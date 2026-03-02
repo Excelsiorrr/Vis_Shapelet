@@ -1,0 +1,11 @@
+dataset: mitecg
+defaults:
+  datasets: mitecg
+  test: true
+  train: false
+  dataset: mitecg
+  num_classes: 4
+  proto_len: 30
+  num_prototypes: 2
+  meta_dataset: default
+train: false

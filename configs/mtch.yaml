@@ -1,0 +1,10 @@
+base:
+  root_dir: D:/shapelet/ShapeX
+dataset:
+  name: mtch
+  meta_dataset: default
+mtch:
+  num_classes: 2
+  seq_len: 1400
+  proto_len: 100
+  num_prototypes: 2
