@@ -48,8 +48,13 @@
   - 聚类参数: `cluster_k`
 - 输出:
   - 数据集元信息（只读）: `sampling_rate`, `seq_len`
+    - 其中 `sampling_rate` 表示时间粒度字符串，当前约定为 `hour|min|day|second|unknown`，含义是 `1 step = ?`
   - 训练元信息（只读）: `shapelet_num`, `shapelet_len`
-  - 训练集可视化: 基于 `kmeans` 的聚类结果展示；用户修改 `cluster_k` 后实时刷新
+  - 训练集可视化:
+    - 聚类前先对每条训练序列做 z-normalized
+    - 将归一化后的序列展平后做 `kmeans`
+    - 可视化时不画 PCA 散点图，而是对每个簇回到原始序列空间画“中心线 + 分位带”
+    - 每簇同时提供 KMeans 的簇中心线（centroid）和中位数曲线，并用 25%~75% 分位带（IQR）表示簇内波动
   - 测试集分类结果指标展示: `acc/f1/auc`（数据集级）
   - 测试集可视化: 按类别展示测试集样本分布/样本列表，并对低 `margin` 样本提供特殊可视化
 - 交互:
@@ -192,6 +197,31 @@
 - `margin = probs[top1] - probs[top2]`
 - 低 margin 样本定义:
   - `margin <= margin_threshold`（默认 `0.1`）
+
+## 3.9 Part A 训练集聚类展示口径
+- 聚类输入:
+  - 使用训练集原始序列 `x in R^{T x D}`
+  - 对每条样本分别做 z-normalized，再作为聚类输入
+  - 推荐口径:
+    - `x_norm[t,d] = (x[t,d] - mean_d(x[:,d])) / std_d(x[:,d])`
+    - 若某维 `std_d = 0`，该维按 `1` 处理，避免除零
+  - 将 `x_norm` 展平成一维向量后输入 `kmeans`
+- 聚类输出:
+  - 输出簇编号 `cluster_id`
+  - `cluster_k` 仅控制簇数，不改变后续预测逻辑
+- 可视化口径:
+  - 不使用 PCA/UMAP 等二维投影散点图作为 Part A 首版训练集主视图
+  - 对每个簇，回到原始序列空间统计簇内样本
+  - 每个簇返回一条 `centroid` 线，表示该簇成员在原始序列空间中的均值中心线
+  - 每个时间点逐维统计:
+    - 中位数 `median`
+    - 25% 分位数 `q25`
+    - 75% 分位数 `q75`
+  - 前端展示:
+    - 一条线画 `centroid`
+    - 一条粗线画 `median`
+    - 阴影带画 `[q25, q75]`
+  - 该视图的目标是展示“这一簇典型形态 + 簇内波动”，而不是样本点在二维平面中的相对位置
 
 ## 4. API 契约（v1）
 - API 契约已拆分到独立文档: `vis_shapelet_api.md`
