@@ -42,16 +42,25 @@
 ## 2. 页面需求拆解（PRD）
 
 ## 2.1 Part A: Data Panel
-- 输入: `sample_id`, 原始序列 `x[t,d]`, 元信息 `sampling_rate`, `seq_len`, `label`
+- 输入:
+  - 用户传入的数据文件 `dataset_file`
+  - 初版支持从内置数据集选择: `mitecg | mcce | mcch | mtce | mtch`
+  - 聚类参数: `cluster_k`
 - 输出:
-  - 预测: `logits`, `probs`, `pred_class`, `margin`
-  - 指标: `acc/f1/auc`（数据集级）
-  - 训练元信息（只读）: `shapelet_num`, `shapelet_len`, `loss曲线`
+  - 数据集元信息（只读）: `sampling_rate`, `seq_len`
+  - 训练元信息（只读）: `shapelet_num`, `shapelet_len`
+  - 训练集可视化: 基于 `kmeans` 的聚类结果展示；用户修改 `cluster_k` 后实时刷新
+  - 测试集分类结果指标展示: `acc/f1/auc`（数据集级）
+  - 测试集可视化: 按类别展示测试集样本分布/样本列表，并对低 `margin` 样本提供特殊可视化
 - 交互:
+  - 选择内置数据集或上传数据文件
+  - 调整聚类类别数 `cluster_k`
   - 选择样本
+  - 在训练集聚类视图与测试集类别视图中联动高亮样本
   - 切时间窗建议 `shapelet_len`（MVP 只记录，不触发在线训练）
   - 保存分析会话
 - 验收:
+  - 同一 `dataset_file/internal_dataset + model_ckpt + cluster_k` 下，训练集聚类结果一致
   - 同一 `sample_id + model_ckpt` 的预测结果一致
 
 ## 2.2 Part B: Shapelet Library Panel（MVP 只读）
@@ -384,8 +393,9 @@
   - 不同数据集配置切换
   - 长序列与高 shapelet 数压力测试
 
-## 9. 风险与待确认（开工前必须填）
-- R1: `I` 的最终定义使用 `cosine` 还是 `-L2`？
+## 9. 关键决策记录（v1）
+- R1: `I` 在 v1 中定义为底层 shapelet matcher 直接输出的模型原生匹配分数；默认实现采用 `use_shapelet_layer=True` 和 `dist_measure='cosine'`；统一语义为“值越大表示匹配越强”
+  - 后续改进空间: 可增加 `-L2`、cross-correlation 等替代口径，并提供跨口径对照实验，评估其对热力图、players 和归因结果稳定性的影响
 - R2: `shapelet_temperature (tau)` 在 v1 中全数据集统一为固定值；`Omega` 按数据集配置，初始值依据该数据集的 `I` 分布直方图确定
 - R3: baseline 在 v1 中统一为 `linear_interp`
   - 后续改进空间: 可增加 `zero`、`dataset_mean`、局部样本库插值、类条件 baseline，并比较不同 baseline 对 what-if / Shapley 稳定性的影响
@@ -393,7 +403,8 @@
   - 后续改进空间: 可增加 `prob` 与 `logit` 双输出对照视图，并评估不同口径下归因排序的一致性
 - R5: Part B 的类别不平衡修正在 v1 中采用 `lift`
   - 后续改进空间: 可补充 `PMI`、加权 lift、置信区间或显著性检验，用于减少小样本类别的统计波动
-- R6: 在线训练完全移出首版
+- R6: 在线训练完全移出首版；v1 只支持加载已有 checkpoint 做推理、匹配、players 构建与解释计算
+  - 后续改进空间: 可在后续版本增加异步训练任务、训练进度查询、训练结果版本管理与训练后自动刷新可视分析结果
 
 ## 10. 默认配置（可直接落地）
 
