@@ -57,6 +57,10 @@
     - 每簇同时提供 KMeans 的簇中心线（centroid）和中位数曲线，并用 25%~75% 分位带（IQR）表示簇内波动
   - 测试集分类结果指标展示: `acc/f1/auc`（数据集级）
   - 测试集可视化: 按类别展示测试集样本分布/样本列表，并对低 `margin` 样本提供特殊可视化
+  - 接口拆分原则:
+    - 首屏同步只加载基础信息与 warning
+    - 测试集指标、训练集聚类、低 margin 列表、按类样本列表均采用异步加载
+    - 列表类接口必须支持分页
 - 交互:
   - 选择内置数据集或上传数据文件
   - 调整聚类类别数 `cluster_k`
@@ -69,6 +73,7 @@
   - 同一 `sample_id + model_ckpt` 的预测结果一致
 - MVP 备注:
   - `dataset_file` 在 PRD 中保留，但首版后端暂不落地；首版仅支持内置数据集选择
+  - `Part A` 不再提供单一重型 `/overview` 接口；首版前端应按 `meta -> metrics / clusters / lists -> sample detail` 的分层请求流实现
 - 已知问题:
   - 对 `mcce | mcch | mtce | mtch`，Part A 首版后端严格复用当前 `get_saliency_data(return_dict=True)` 的返回口径，因此 `TRAIN/TEST` 与底层原始 split 的语义存在映射反转问题；接口响应中必须显式返回该提示
   - 对 `mcce | mcch | mtce | mtch`，分类 checkpoint 的实际输出类别数为 `4`，而当前 yaml 仍保留 `num_classes: 2` 这一另一种选择；Part A 首版以后端实际推理所依赖的 checkpoint 输出为准

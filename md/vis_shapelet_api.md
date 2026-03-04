@@ -38,10 +38,18 @@
     "shapelet_len": "int",
     "classifier_num_classes": "int"
   },
+  "MetaResponse": {
+    "spec_version": "string",
+    "dataset_meta": "DatasetMeta",
+    "training_meta": "TrainingMeta",
+    "train_split_mapping": "SplitMappingNote",
+    "test_split_mapping": "SplitMappingNote",
+    "warnings": "ApiWarning[]"
+  },
   "ClusterProfile": {
     "cluster_id": "int",
     "size": "int",
-    "sample_ids": "string[]",
+    "sample_ids_preview": "string[]",
     "centroid_sequence": "float[T][D]",
     "median_sequence": "float[T][D]",
     "q25_sequence": "float[T][D]",
@@ -73,23 +81,52 @@
     "code": "string",
     "message": "string"
   },
-  "DatasetOverviewResponse": {
+  "MetricsResponse": {
     "spec_version": "string",
-    "dataset_meta": "DatasetMeta",
-    "training_meta": "TrainingMeta",
-    "cluster_k": "int",
-    "train_split_mapping": "SplitMappingNote",
-    "test_split_mapping": "SplitMappingNote",
-    "train_cluster_profiles": "ClusterProfile[]",
     "test_metrics": {
       "acc": "float",
       "f1": "float",
       "auc": "float|null"
     },
-    "test_by_class": {
-      "class_id": "TestSampleSummary[]"
+    "sample_count": "int",
+    "class_distribution": {
+      "class_id": "int"
     },
-    "low_margin_samples": "LowMarginSample[]",
+    "low_margin_count": "int"
+  },
+  "ClustersResponse": {
+    "spec_version": "string",
+    "dataset": "string",
+    "cluster_k": "int",
+    "train_cluster_profiles": "ClusterProfile[]",
+    "warnings": "ApiWarning[]"
+  },
+  "LowMarginSampleSummary": {
+    "sample_id": "string",
+    "label": "int|null",
+    "pred_class": "int",
+    "probs": "float[C]",
+    "margin": "float",
+    "sequence": "float[T][D]"
+  },
+  "LowMarginSamplesResponse": {
+    "spec_version": "string",
+    "dataset": "string",
+    "margin_threshold": "float",
+    "total": "int",
+    "offset": "int",
+    "limit": "int",
+    "items": "LowMarginSampleSummary[]",
+    "warnings": "ApiWarning[]"
+  },
+  "ClassSamplesResponse": {
+    "spec_version": "string",
+    "dataset": "string",
+    "label": "int",
+    "total": "int",
+    "offset": "int",
+    "limit": "int",
+    "items": "TestSampleSummary[]",
     "warnings": "ApiWarning[]"
   },
   "SampleDetailResponse": {
@@ -112,7 +149,7 @@
 - 这是什么:
   - 数据集本身的基础信息，不是模型输出，也不是单样本数据。
 - 一般出现在哪:
-  - `DatasetOverviewResponse.dataset_meta`
+  - `MetaResponse.dataset_meta`
 - 前端通常怎么用:
   - 展示在总览页顶部信息卡片。
   - 给图表或详情面板显示全局上下文。
@@ -125,7 +162,7 @@
 - 这是什么:
   - 模型训练阶段得到的元信息，描述当前模型规模和关键配置。
 - 一般出现在哪:
-  - `DatasetOverviewResponse.training_meta`
+  - `MetaResponse.training_meta`
 - 前端通常怎么用:
   - 展示在“模型信息”卡片中。
   - 为后续交互提供默认值，例如默认窗口长度。
@@ -140,18 +177,18 @@
   - 聚类时先对每条原始序列做 z-normalized，再把归一化后的序列展平后送入 KMeans。
   - 可视化时不画 PCA 散点图，而是回到原始序列空间，画每簇“中心线 + 分位带”。
 - 一般出现在哪:
-  - `DatasetOverviewResponse.train_cluster_profiles`
+  - `ClustersResponse.train_cluster_profiles`
 - 前端通常怎么用:
   - 每个簇画一张折线图或一个小面板。
   - 可同时画两条代表线:
     - `centroid_sequence`: KMeans 簇中心线
     - `median_sequence`: 更抗异常值的典型形态线
   - 用 `q25_sequence` 到 `q75_sequence` 之间的区域作为分位带。
-  - `sample_ids` 可用于联动样本列表或后续高亮。
+  - `sample_ids_preview` 可用于展示少量成员样本 id 预览。
 - 字段说明:
   - `cluster_id`: 聚类后的簇编号。
   - `size`: 当前簇包含的训练样本数。
-  - `sample_ids`: 当前簇内成员样本 id 列表。
+  - `sample_ids_preview`: 当前簇内成员样本 id 预览列表，默认仅返回少量样本用于前端展示。
   - `centroid_sequence`: 当前簇成员在原始序列空间的 centroid 线，可理解为逐时间点均值得到的簇中心线。
   - `median_sequence`: 在原始序列空间中，对簇内所有样本逐时间点取中位数得到的中心线。
   - `q25_sequence`: 在原始序列空间中，对簇内所有样本逐时间点取 25% 分位数。
@@ -175,7 +212,7 @@
 - 这是什么:
   - 测试样本在列表视图中的简化摘要。
 - 一般出现在哪:
-  - `DatasetOverviewResponse.test_by_class`
+  - `ClassSamplesResponse.items`
 - 前端通常怎么用:
   - 渲染分类后的样本列表。
   - 点击某个样本后再请求详情接口。
@@ -188,7 +225,7 @@
 - 这是什么:
   - 预测不够稳定的测试样本详情。
 - 一般出现在哪:
-  - `DatasetOverviewResponse.low_margin_samples`
+  - `SampleDetailResponse.sequence` 的上游选样结果，或后端内部计算过程。
 - 前端通常怎么用:
   - 在“重点关注样本”区域展示。
   - 直接画出其原始序列，无需再次请求详情接口。
@@ -200,8 +237,8 @@
 - 这是什么:
   - 一个解释性对象，说明“接口名义上的 split”和“底层实际使用的数据源”是否一致。
 - 一般出现在哪:
-  - `DatasetOverviewResponse.train_split_mapping`
-  - `DatasetOverviewResponse.test_split_mapping`
+  - `MetaResponse.train_split_mapping`
+  - `MetaResponse.test_split_mapping`
 - 前端通常怎么用:
   - 在页面上提示用户存在已知映射问题。
   - 不建议拿它做主业务逻辑判断，更适合作为说明信息展示。
@@ -213,7 +250,10 @@
 - 这是什么:
   - 后端主动返回的告警信息。
 - 一般出现在哪:
-  - `DatasetOverviewResponse.warnings`
+  - `MetaResponse.warnings`
+  - `ClustersResponse.warnings`
+  - `LowMarginSamplesResponse.warnings`
+  - `ClassSamplesResponse.warnings`
   - `SampleDetailResponse.warnings`
 - 前端通常怎么用:
   - 渲染成页面顶部提示条、弹窗说明或可展开告警列表。
@@ -221,23 +261,37 @@
   - `code`: 稳定的告警代码，适合前端做条件判断。
   - `message`: 面向人的解释文本，适合直接展示。
 
-##### DatasetOverviewResponse
+##### MetaResponse
 - 这是什么:
-  - Part A 总览页的聚合响应。一个接口返回总览页大部分所需数据。
+  - Part A 首屏基础信息响应。
 - 前端通常怎么用:
   - 页面初始化时优先请求它。
-  - 请求完成后即可同时填充总览卡片、训练簇统计图、分类列表、低置信样本列表。
-- 字段说明:
-  - `spec_version`: 响应契约版本。
-  - `dataset_meta`: 数据集基础信息。
-  - `training_meta`: 模型训练元信息。
-  - `cluster_k`: 本次请求实际使用的聚类数，通常与查询参数一致。
-  - `train_split_mapping`, `test_split_mapping`: split 映射说明。
-  - `train_cluster_profiles`: 训练集各簇的统计曲线数据。
-  - `test_metrics`: 测试集整体指标。
-  - `test_by_class`: 以类别 id 为 key 的测试样本分组。
-  - `low_margin_samples`: 低置信样本明细列表。
-  - `warnings`: 全局告警。
+  - 请求完成后即可填充顶部信息卡片、全局 warning 和 split 映射说明。
+
+##### MetricsResponse
+- 这是什么:
+  - 测试集评估摘要响应。
+- 前端通常怎么用:
+  - 作为异步卡片数据源，展示 `acc/f1/auc` 与样本数量摘要。
+
+##### ClustersResponse
+- 这是什么:
+  - 训练集聚类统计响应。
+- 前端通常怎么用:
+  - 在总览页主体区域异步加载训练簇图，不阻塞首屏。
+
+##### LowMarginSamplesResponse
+- 这是什么:
+  - 低 margin 样本分页响应。
+- 前端通常怎么用:
+  - 填充“重点关注样本”列表。
+  - 可直接用返回的 `sequence` 画小图，必要时再请求样本详情补更多字段。
+
+##### ClassSamplesResponse
+- 这是什么:
+  - 按类别分页返回的测试样本摘要列表。
+- 前端通常怎么用:
+  - 渲染按类查看的样本列表或分页表格。
 
 ##### SampleDetailResponse
 - 这是什么:
@@ -328,44 +382,67 @@
   - 页面首次加载时可先请求它，决定下拉框、卡片列表或默认数据集。
   - 若只做 Part A 页面，这通常是第一个请求。
 
-#### 1) 获取 Part A 数据集总览
-- `GET /api/v1/part-a/datasets/{dataset_name}/overview?cluster_k=4&margin_threshold=0.1`
+#### 1) 获取 Part A 首屏基础信息
+- `GET /api/v1/part-a/datasets/{dataset_name}/meta`
 - 返回:
   - 数据集元信息: `sampling_rate`, `seq_len`
   - 训练元信息: `shapelet_num`, `shapelet_len`, `classifier_num_classes`
-  - 训练集聚类统计曲线: `train_cluster_profiles`
-  - 测试集指标: `acc/f1/auc`
-  - 测试集按类别样本列表: `test_by_class`
-  - 低 `margin` 样本明细: `low_margin_samples`
-  - warnings:
-    - `dataset_file` MVP 未启用
-    - `mcce | mcch | mtce | mtch` 的 split 映射问题
-    - `mcce | mcch | mtce | mtch` 的 `4 类 checkpoint` vs `yaml 中 2 类配置`
+  - split 映射说明
+  - warnings
 - 前端理解:
-  - 这是总览页主接口，建议把它当成“页面主数据源”。
-  - `cluster_k` 会影响训练簇的数量。
-  - `margin_threshold` 会影响低置信样本列表长度。
-  - 聚类前后处理口径:
-    - 聚类输入使用 z-normalized 后的训练序列。
-    - 可视化展示使用原始训练序列的统计曲线，不使用 PCA 散点图。
-  - 典型页面映射:
-    - `dataset_meta` + `training_meta`: 顶部信息卡片
-    - `train_cluster_profiles`: 每簇 centroid + 中位数线 + IQR 分位带图
-    - `test_metrics`: 指标卡片
-    - `test_by_class`: 分类样本列表
-    - `low_margin_samples`: 重点关注样本区
-    - `warnings`: 页面提示条
+  - 这是 Part A 首屏同步接口，应尽量轻量。
+  - 页面应优先用它渲染基础信息，再异步加载评估、聚类和样本列表。
 
-#### 2) 获取单样本详情
+#### 2) 获取测试集评估摘要
+- `GET /api/v1/part-a/datasets/{dataset_name}/metrics?margin_threshold=0.1`
+- 返回:
+  - `acc/f1/auc`
+  - 测试集样本总数 `sample_count`
+  - 类别分布 `class_distribution`
+  - 低 margin 样本数量 `low_margin_count`
+- 前端理解:
+  - 这是评估摘要接口，适合作为异步指标卡片数据源。
+  - `margin_threshold` 会影响 `low_margin_count`。
+
+#### 3) 获取训练集聚类统计
+- `GET /api/v1/part-a/datasets/{dataset_name}/clusters?cluster_k=4`
+- 返回:
+  - `cluster_k`
+  - 训练集聚类统计曲线: `train_cluster_profiles`
+  - warnings
+- 前端理解:
+  - 这是训练簇视图的数据源。
+  - 聚类输入使用 z-normalized 后的训练序列。
+  - 可视化展示使用原始训练序列的统计曲线，不使用 PCA 散点图。
+
+#### 4) 获取低 margin 样本摘要分页列表
+- `GET /api/v1/part-a/datasets/{dataset_name}/samples/low-margin?threshold=0.1&offset=0&limit=50`
+- 返回:
+  - 低 margin 样本列表 `items`
+  - `total / offset / limit`
+- 前端理解:
+  - 这是“重点关注样本”区的数据源。
+  - 列表返回摘要和原始序列，可直接用于小图或快速预览。
+
+#### 5) 获取按类别分页的测试样本列表
+- `GET /api/v1/part-a/datasets/{dataset_name}/samples?label=1&offset=0&limit=50`
+- 返回:
+  - 指定类别下的测试样本摘要列表 `items`
+  - `total / offset / limit`
+- 前端理解:
+  - 这是“按类分页”展示的数据源。
+  - 若前端需要展示所有类别，可先请求 `metrics` 获取类别分布，再按类分页请求本接口。
+
+#### 6) 获取单样本详情
 - `GET /api/v1/part-a/datasets/{dataset_name}/samples/{sample_id}?split=test`
 - 返回:
   - 样本原始序列
   - `pred_class`, `probs`, `margin`
   - 切时间窗建议 `suggested_window_len = shapelet_len`
-  - warnings（同总览接口）
+  - warnings（同 meta 接口）
 - 前端理解:
   - 这是按需详情接口，适合点击样本后再请求。
-  - `sample_id` 通常来自 `test_by_class[*].sample_id` 或 `low_margin_samples[*].sample_id`。
+  - `sample_id` 通常来自低 margin 列表或按类分页列表。
   - `sequence` 可直接用来画折线图或热图。
   - `suggested_window_len` 可作为前端初始时间窗或刷选长度默认值。
 
