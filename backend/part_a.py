@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 from fastapi import APIRouter, FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sklearn.cluster import KMeans
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
@@ -48,10 +49,19 @@ class TrainingMeta(BaseModel):
     classifier_num_classes: int
 
 
+class MetaResponse(BaseModel):
+    spec_version: str = SPEC_VERSION
+    dataset_meta: DatasetMeta
+    training_meta: TrainingMeta
+    train_split_mapping: SplitMappingNote
+    test_split_mapping: SplitMappingNote
+    warnings: list[ApiWarning] = Field(default_factory=list)
+
+
 class ClusterProfile(BaseModel):
     cluster_id: int
     size: int
-    sample_ids: list[str]
+    sample_ids_preview: list[str]
     centroid_sequence: list[list[float]]
     median_sequence: list[list[float]]
     q25_sequence: list[list[float]]
@@ -62,6 +72,14 @@ class MetricSummary(BaseModel):
     acc: float
     f1: float
     auc: float | None
+
+
+class MetricsResponse(BaseModel):
+    spec_version: str = SPEC_VERSION
+    test_metrics: MetricSummary
+    sample_count: int
+    class_distribution: dict[str, int]
+    low_margin_count: int
 
 
 class PredictionSummary(BaseModel):
@@ -85,22 +103,47 @@ class LowMarginSample(BaseModel):
     sequence: list[list[float]]
 
 
+class LowMarginSampleSummary(BaseModel):
+    sample_id: str
+    label: int | None
+    pred_class: int
+    probs: list[float]
+    margin: float
+    sequence: list[list[float]]
+
+
 class SplitMappingNote(BaseModel):
     requested_role: str
     actual_source: str
 
 
-class DatasetOverviewResponse(BaseModel):
+class ClustersResponse(BaseModel):
     spec_version: str = SPEC_VERSION
-    dataset_meta: DatasetMeta
-    training_meta: TrainingMeta
+    dataset: str
     cluster_k: int
-    train_split_mapping: SplitMappingNote
-    test_split_mapping: SplitMappingNote
     train_cluster_profiles: list[ClusterProfile]
-    test_metrics: MetricSummary
-    test_by_class: dict[str, list[TestSampleSummary]]
-    low_margin_samples: list[LowMarginSample]
+    warnings: list[ApiWarning] = Field(default_factory=list)
+
+
+class LowMarginSamplesResponse(BaseModel):
+    spec_version: str = SPEC_VERSION
+    dataset: str
+    margin_threshold: float
+    total: int
+    offset: int
+    limit: int
+    items: list[LowMarginSampleSummary]
+    warnings: list[ApiWarning] = Field(default_factory=list)
+
+
+class ClassSamplesResponse(BaseModel):
+    spec_version: str = SPEC_VERSION
+    dataset: str
+    label: int
+    total: int
+    offset: int
+    limit: int
+    items: list[TestSampleSummary]
     warnings: list[ApiWarning] = Field(default_factory=list)
 
 
@@ -121,6 +164,7 @@ class LoadedDataset:
     dataset_name: str
     args: Any
     class_model: Any
+    inference_device: str
     train_dataset: Any
     test_dataset: Any
     dataset_meta: DatasetMeta
@@ -128,6 +172,13 @@ class LoadedDataset:
     warnings: list[ApiWarning]
     train_mapping: SplitMappingNote
     test_mapping: SplitMappingNote
+
+
+@dataclass
+class CachedPredictions:
+    y_true: np.ndarray
+    preds: np.ndarray
+    probs: np.ndarray
 
 
 def _to_tensor(value: Any) -> torch.Tensor:
@@ -248,6 +299,30 @@ def _split_mapping(dataset_name: str, split_name: str) -> SplitMappingNote:
 class PartAService:
     def __init__(self, project_root: Path | None = None) -> None:
         self.project_root = Path(project_root or Path(__file__).resolve().parents[1])
+        self.inference_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    def _dataset_labels(self, dataset: Any) -> torch.Tensor:
+        return _to_tensor(dataset.y).long()
+
+    def _dataset_sequences(self, dataset: Any) -> torch.Tensor:
+        # Normalize backend datasets to (N, T, D). Some loaders expose (T, N, D).
+        x = _to_tensor(dataset.X).float()
+        labels = self._dataset_labels(dataset)
+        sample_count = int(labels.shape[0])
+
+        if x.dim() != 3:
+            raise ValueError(f"Expected 3D dataset tensor, got shape {tuple(x.shape)}")
+        if x.shape[0] == sample_count:
+            return x
+        if x.shape[1] == sample_count:
+            return x.transpose(0, 1).contiguous()
+        raise ValueError(
+            f"Unable to align dataset tensor shape {tuple(x.shape)} with labels shape {tuple(labels.shape)}"
+        )
+
+    def _dataset_sequence_at(self, dataset: Any, sample_id: int) -> torch.Tensor:
+        sequences = self._dataset_sequences(dataset)
+        return sequences[sample_id]
 
     @lru_cache(maxsize=len(SUPPORTED_DATASETS))
     def load_dataset_bundle(self, dataset_name: str) -> LoadedDataset:
@@ -270,8 +345,8 @@ class PartAService:
         )
         args = get_args(config)
         args.root_path = str(self.project_root)
-        args.use_gpu = False
-        args.device = "cpu"
+        args.use_gpu = self.inference_device.startswith("cuda")
+        args.device = self.inference_device
 
         classifier_ckpt = self.project_root / "checkpoints" / "classification_models" / f"{dataset_name}_transformer.pt"
         if not classifier_ckpt.exists():
@@ -281,8 +356,8 @@ class PartAService:
 
         pipeline = ShapeXPipline(config)
         pipeline.args.root_path = str(self.project_root)
-        pipeline.args.use_gpu = False
-        pipeline.args.device = "cpu"
+        pipeline.args.use_gpu = self.inference_device.startswith("cuda")
+        pipeline.args.device = self.inference_device
         pipeline.args.num_classes = args.num_classes
         pipeline.args.num_class = args.num_classes
 
@@ -290,7 +365,7 @@ class PartAService:
         train_dataset = data_dict["TRAIN"]
         test_dataset = data_dict["TEST"]
         class_model = pipeline.get_class_model(train_dataset.X.cpu())
-        class_model = class_model.to("cpu")
+        class_model = class_model.to(self.inference_device)
         class_model.eval()
 
         explainer_ckpt = self.project_root / "checkpoints" / "explainer" / f"{dataset_name}_shapex.pt"
@@ -314,6 +389,7 @@ class PartAService:
             dataset_name=dataset_name,
             args=pipeline.args,
             class_model=class_model,
+            inference_device=self.inference_device,
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             dataset_meta=dataset_meta,
@@ -323,16 +399,33 @@ class PartAService:
             test_mapping=_split_mapping(dataset_name, "TEST"),
         )
 
-    def _predict_batch(self, model: Any, sequences: torch.Tensor) -> np.ndarray:
-        # Run the classification model on a batch of sequences and return raw logits.
-        # Later steps convert these logits into probabilities, predicted classes, and margin.
+    def _predict_batch(self, model: Any, sequences: torch.Tensor, batch_size: int = 128) -> np.ndarray:
+        # Run the classifier in small batches so device memory stays bounded.
         x = sequences.detach().cpu().float()
-        batch_size, seq_len, _ = x.shape
-        times = torch.arange(1, seq_len + 1, dtype=torch.float32).unsqueeze(1).repeat(1, batch_size)
-        src = x.transpose(0, 1)
+        total, seq_len, _ = x.shape
+        logits_parts: list[np.ndarray] = []
+        model_device = next(model.parameters()).device
+
         with torch.no_grad():
-            logits = model(src, times).detach().cpu().numpy()
-        return logits
+            for start in range(0, total, batch_size):
+                end = min(start + batch_size, total)
+                chunk = x[start:end].to(model_device)
+                chunk_batch = chunk.shape[0]
+                times = torch.arange(1, seq_len + 1, dtype=torch.float32, device=model_device).unsqueeze(1).repeat(1, chunk_batch)
+                src = chunk.transpose(0, 1)
+                logits = model(src, times).detach().cpu().numpy()
+                logits_parts.append(logits)
+
+        return np.concatenate(logits_parts, axis=0)
+
+    @lru_cache(maxsize=len(SUPPORTED_DATASETS))
+    def _cached_test_predictions(self, dataset_name: str) -> CachedPredictions:
+        bundle = self.load_dataset_bundle(dataset_name)
+        test_x = self._dataset_sequences(bundle.test_dataset)
+        test_y = self._dataset_labels(bundle.test_dataset)
+        logits = self._predict_batch(bundle.class_model, test_x)
+        y_true, preds, probs = self._summarize_predictions(test_y, logits)
+        return CachedPredictions(y_true=y_true, preds=preds, probs=probs)
 
     def _summarize_predictions(self, labels: torch.Tensor, logits: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         # Convert raw model output into frontend-friendly prediction pieces:
@@ -368,7 +461,7 @@ class PartAService:
         # Sequences are z-normalized before KMeans so clustering focuses on shape.
         # The frontend view does not use PCA; instead it renders each cluster as the
         # raw-space centroid line, the original-series median center line, and the q25-q75 band.
-        x = _to_tensor(dataset.X).float()
+        x = self._dataset_sequences(dataset)
         flattened = _z_normalize_for_clustering(x)
         n_clusters = max(1, min(cluster_k, flattened.shape[0]))
         kmeans = KMeans(n_clusters=n_clusters, random_state=2026, n_init=10)
@@ -388,7 +481,7 @@ class PartAService:
                 ClusterProfile(
                     cluster_id=int(cluster_id),
                     size=int(member_indices.size),
-                    sample_ids=[str(idx) for idx in member_indices.tolist()],
+                    sample_ids_preview=[str(idx) for idx in member_indices[:8].tolist()],
                     centroid_sequence=centroid_sequence.tolist(),
                     median_sequence=median_sequence.tolist(),
                     q25_sequence=q25_sequence.tolist(),
@@ -439,27 +532,107 @@ class PartAService:
         low_margin.sort(key=lambda item: item.margin)
         return grouped, low_margin
 
-    def get_dataset_overview(self, dataset_name: str, cluster_k: int, margin_threshold: float) -> DatasetOverviewResponse:
-        # Main Part A overview workflow.
-        # One call assembles the dataset header info, training cluster profile data,
-        # test-set metrics, grouped sample summaries, low-margin details, and warnings.
+    @lru_cache(maxsize=len(SUPPORTED_DATASETS) * 4)
+    def _cached_cluster_profiles(self, dataset_name: str, cluster_k: int) -> list[ClusterProfile]:
         bundle = self.load_dataset_bundle(dataset_name)
-        test_x = _to_tensor(bundle.test_dataset.X).float()
-        test_y = _to_tensor(bundle.test_dataset.y).long()
-        logits = self._predict_batch(bundle.class_model, test_x)
-        y_true, preds, probs = self._summarize_predictions(test_y, logits)
-        grouped, low_margin = self._group_test_samples(test_x, test_y, preds, probs, margin_threshold)
+        return self._build_training_cluster_profiles(bundle.train_dataset, cluster_k)
 
-        return DatasetOverviewResponse(
+    def get_meta(self, dataset_name: str) -> MetaResponse:
+        bundle = self.load_dataset_bundle(dataset_name)
+        return MetaResponse(
             dataset_meta=bundle.dataset_meta,
             training_meta=bundle.training_meta,
-            cluster_k=cluster_k,
             train_split_mapping=bundle.train_mapping,
             test_split_mapping=bundle.test_mapping,
-            train_cluster_profiles=self._build_training_cluster_profiles(bundle.train_dataset, cluster_k),
-            test_metrics=self._compute_metrics(y_true, preds, probs),
-            test_by_class=grouped,
-            low_margin_samples=low_margin,
+            warnings=bundle.warnings,
+        )
+
+    def get_metrics(self, dataset_name: str, margin_threshold: float) -> MetricsResponse:
+        bundle = self.load_dataset_bundle(dataset_name)
+        cached = self._cached_test_predictions(dataset_name)
+        test_x = self._dataset_sequences(bundle.test_dataset)
+        test_y = self._dataset_labels(bundle.test_dataset)
+        _, low_margin = self._group_test_samples(test_x, test_y, cached.preds, cached.probs, margin_threshold)
+        class_distribution = {
+            str(label): int(count)
+            for label, count in zip(*np.unique(cached.y_true, return_counts=True), strict=False)
+        }
+        return MetricsResponse(
+            test_metrics=self._compute_metrics(cached.y_true, cached.preds, cached.probs),
+            sample_count=int(cached.y_true.shape[0]),
+            class_distribution=class_distribution,
+            low_margin_count=len(low_margin),
+        )
+
+    def get_clusters(self, dataset_name: str, cluster_k: int) -> ClustersResponse:
+        bundle = self.load_dataset_bundle(dataset_name)
+        return ClustersResponse(
+            dataset=bundle.dataset_name,
+            cluster_k=cluster_k,
+            train_cluster_profiles=self._cached_cluster_profiles(dataset_name, cluster_k),
+            warnings=bundle.warnings,
+        )
+
+    def list_low_margin_samples(
+        self,
+        dataset_name: str,
+        margin_threshold: float,
+        offset: int,
+        limit: int,
+    ) -> LowMarginSamplesResponse:
+        bundle = self.load_dataset_bundle(dataset_name)
+        cached = self._cached_test_predictions(dataset_name)
+        test_x = self._dataset_sequences(bundle.test_dataset)
+        test_y = self._dataset_labels(bundle.test_dataset)
+        _, low_margin = self._group_test_samples(test_x, test_y, cached.preds, cached.probs, margin_threshold)
+        items = [
+            LowMarginSampleSummary(
+                sample_id=item.sample_id,
+                label=item.label,
+                pred_class=item.pred_class,
+                probs=item.probs,
+                margin=item.margin,
+                sequence=item.sequence,
+            )
+            for item in low_margin[offset : offset + limit]
+        ]
+        return LowMarginSamplesResponse(
+            dataset=bundle.dataset_name,
+            margin_threshold=margin_threshold,
+            total=len(low_margin),
+            offset=offset,
+            limit=limit,
+            items=items,
+            warnings=bundle.warnings,
+        )
+
+    def list_class_samples(self, dataset_name: str, label: int, offset: int, limit: int) -> ClassSamplesResponse:
+        bundle = self.load_dataset_bundle(dataset_name)
+        cached = self._cached_test_predictions(dataset_name)
+        test_y = self._dataset_labels(bundle.test_dataset)
+        items: list[TestSampleSummary] = []
+        for idx, true_label in enumerate(test_y.tolist()):
+            if int(true_label) != label:
+                continue
+            prob = cached.probs[idx]
+            items.append(
+                TestSampleSummary(
+                    sample_id=str(idx),
+                    label=int(true_label),
+                    prediction=PredictionSummary(
+                        pred_class=int(cached.preds[idx]),
+                        probs=[float(v) for v in prob.tolist()],
+                        margin=_margin_from_probs(prob),
+                    ),
+                )
+            )
+        return ClassSamplesResponse(
+            dataset=bundle.dataset_name,
+            label=label,
+            total=len(items),
+            offset=offset,
+            limit=limit,
+            items=items[offset : offset + limit],
             warnings=bundle.warnings,
         )
 
@@ -471,11 +644,13 @@ class PartAService:
         if split_name not in {"TRAIN", "TEST"}:
             raise HTTPException(status_code=400, detail="split must be one of: train, test")
         dataset = bundle.train_dataset if split_name == "TRAIN" else bundle.test_dataset
-        if sample_id < 0 or sample_id >= len(dataset):
+        labels = self._dataset_labels(dataset)
+        sample_count = int(labels.shape[0])
+        if sample_id < 0 or sample_id >= sample_count:
             raise HTTPException(status_code=404, detail=f"sample_id out of range: {sample_id}")
 
-        sequence = _to_tensor(dataset.X[sample_id]).float().unsqueeze(0)
-        label = int(_to_tensor(dataset.y[sample_id]).item())
+        sequence = self._dataset_sequence_at(dataset, sample_id).unsqueeze(0)
+        label = int(labels[sample_id].item())
         logits = self._predict_batch(bundle.class_model, sequence)[0]
         probs = _softmax_logits(logits[np.newaxis, :])[0]
         prediction = PredictionSummary(
@@ -519,15 +694,47 @@ def list_datasets() -> DatasetListResponse:
     return DatasetListResponse(datasets=items)
 
 
-@router.get("/datasets/{dataset_name}/overview", response_model=DatasetOverviewResponse)
-def get_dataset_overview(
+@router.get("/datasets/{dataset_name}/meta", response_model=MetaResponse)
+def get_dataset_meta(
+    dataset_name: str,
+) -> MetaResponse:
+    return service.get_meta(dataset_name)
+
+
+@router.get("/datasets/{dataset_name}/metrics", response_model=MetricsResponse)
+def get_dataset_metrics(
+    dataset_name: str,
+    margin_threshold: float = Query(default=DEFAULT_MARGIN_THRESHOLD, ge=0.0, le=1.0),
+) -> MetricsResponse:
+    return service.get_metrics(dataset_name, margin_threshold)
+
+
+@router.get("/datasets/{dataset_name}/clusters", response_model=ClustersResponse)
+def get_dataset_clusters(
     dataset_name: str,
     cluster_k: int = Query(default=4, ge=1, le=20),
-    margin_threshold: float = Query(default=DEFAULT_MARGIN_THRESHOLD, ge=0.0, le=1.0),
-) -> DatasetOverviewResponse:
-    # HTTP entrypoint for the Part A overview page.
-    # Query params control training-set clustering granularity and the uncertainty cutoff.
-    return service.get_dataset_overview(dataset_name, cluster_k, margin_threshold)
+) -> ClustersResponse:
+    return service.get_clusters(dataset_name, cluster_k)
+
+
+@router.get("/datasets/{dataset_name}/samples/low-margin", response_model=LowMarginSamplesResponse)
+def get_low_margin_samples(
+    dataset_name: str,
+    threshold: float = Query(default=DEFAULT_MARGIN_THRESHOLD, ge=0.0, le=1.0),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> LowMarginSamplesResponse:
+    return service.list_low_margin_samples(dataset_name, threshold, offset, limit)
+
+
+@router.get("/datasets/{dataset_name}/samples", response_model=ClassSamplesResponse)
+def get_class_samples(
+    dataset_name: str,
+    label: int = Query(..., ge=0),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> ClassSamplesResponse:
+    return service.list_class_samples(dataset_name, label, offset, limit)
 
 
 @router.get("/datasets/{dataset_name}/samples/{sample_id}", response_model=SampleDetailResponse)
@@ -545,6 +752,15 @@ def create_app() -> FastAPI:
     # Create the FastAPI application and register the Part A router under /api/v1/part-a.
     app = FastAPI(title="ShapeX Part A API", version=SPEC_VERSION)
     app.include_router(router)
+
+    @app.get("/", include_in_schema=False)
+    def part_a_debug_home() -> FileResponse:
+        return FileResponse(Path(__file__).with_name("part_a_debug.html"))
+
+    @app.get("/part-a-debug", include_in_schema=False)
+    def part_a_debug_page() -> FileResponse:
+        return FileResponse(Path(__file__).with_name("part_a_debug.html"))
+
     return app
 
 
