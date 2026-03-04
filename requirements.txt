@@ -15,6 +15,7 @@ filelock==3.16.1
 fonttools==4.54.1
 frozenlist==1.4.1
 fsspec==2024.9.0
+fastapi==0.115.6
 idna==3.10
 ipdb==0.13.13
 ipython==8.28.0
@@ -63,6 +64,7 @@ python-dateutil==2.9.0.post0
 pytorch-lightning==2.4.0
 pytz==2024.2
 PyYAML==6.0.2
+pydantic==2.10.4
 reformer-pytorch==1.4.4
 scikit-learn==1.5.2
 scipy==1.14.1
@@ -81,5 +83,6 @@ triton==3.0.0
 tslearn==0.6.3
 typing_extensions==4.12.2
 tzdata==2024.2
+uvicorn==0.32.1
 wcwidth==0.2.13
 yarl==1.15.4
