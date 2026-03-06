@@ -79,16 +79,64 @@
   - 对 `mcce | mcch | mtce | mtch`，分类 checkpoint 的实际输出类别数为 `4`，而当前 yaml 仍保留 `num_classes: 2` 这一另一种选择；Part A 首版以后端实际推理所依赖的 checkpoint 输出为准
 
 ## 2.2 Part B: Shapelet Library Panel（MVP 只读）
-- 输入: checkpoint 中 shapelet/prototype、匹配结果统计
+- 输入:
+  - checkpoint 中 shapelet/prototype
+  - 匹配分数 `I[p,t]`（模型原生输出）
+  - 触发定义（冻结）:
+    - `trigger_{n,p}(Omega) = 1{max_t I_{n,p,t} >= Omega}`
+    - 含义: 对样本 `n` 的 shapelet `p`，只要存在任一时间点达到阈值即记为触发
+  - 统计范围 `scope in {test, train, all}`（默认 `test`）
+    - `train`: 用于观察模型学习到的模式，允许偏乐观
+    - `test`: 用于默认展示与对外解释，代表泛化表现
+    - `all`: 用于探索分析，不作为默认评估口径
+  - 统计粒度 `granularity in {sample, time}`（默认主视图 `sample`）
+    - `sample`（样本级）: 回答“有多少样本触发该 shapelet / 与类别关系如何”
+    - `time`（时间点级）: 回答“shapelet 在时间轴的活跃区间分布”
 - 输出:
-  - shapelet gallery
-  - `I` 分布直方图
-  - 触发次数统计、类别覆盖统计（含类别不平衡修正）
+  - shapelet gallery（静态，阈值无关）:
+    - `shapelet_id`, `prototype`, `shapelet_len`, `ckpt_id`（可附 `sample_ids_preview`）
+  - shapelet stats（动态，阈值相关）:
+    - 全局触发率 `global_trigger_rate`
+    - 按类触发率 `class_trigger_rate`
+    - 触发次数统计、类别覆盖统计（含类别不平衡修正）
+    - `I` 分布直方图（默认单个 shapelet 视图）
+    - 统计口径回显: `scope`, `granularity`, `omega`
+  - 接口拆分原则（禁止重型总接口）:
+    - 首屏仅加载 `meta`（轻量、阈值无关）
+    - `gallery list` 与 `gallery detail` 分开；列表必须分页
+    - `stats summary`、`histogram`、`class stats` 分开按需异步请求
+    - 阈值 `omega` 变化时仅刷新 `stats` 相关接口，不重拉 `gallery/meta`
+    - 不提供单一 `/overview` 或等价“全量打包”接口
+  - 建议请求流:
+    - `meta -> gallery list -> (shapelet detail + stats summary + histogram + class stats)`
 - 交互:
-  - 选择 shapelet，联动 Part C
-  - 阈值预览（不改模型参数，只改解释后处理）
+  - 选择 shapelet（与 Part C 的联动契约暂列为留存项，待 Part C 实现时冻结）
+  - 阈值预览（边界冻结）:
+    - 不触发训练流程
+    - 不修改模型参数与 checkpoint
+    - 仅影响 Part B / Part C / Part D 的统计与可视化结果
+  - 支持切换 `scope`（默认 `test`）
+  - `I` 直方图支持“单个 shapelet / 全局汇总”视图切换（默认单个 shapelet）
 - 验收:
-  - shapelet 统计可追溯到具体样本集合
+  - 可追溯性: 任一 `shapelet_id` 的统计结果可回溯到样本 ID 列表与计数过程
+  - 一致性: 同一 `dataset + ckpt + scope + omega + seed` 下 `global_trigger_rate / class_trigger_rate / lift` 结果一致（误差 0）
+  - 首屏时延: `meta` 与 `gallery list` 在 1.0 秒内返回（P95，本地单机基线）
+  - 阈值交互时延: 仅重算 `stats` 时 500ms 内返回（P95，`T<=2000, P<=64`）
+  - 分页正确性: `offset/limit` 下无重复、无漏项，排序稳定
+  - 稳健性: 当 `N_{p,trig} < min_support` 时 `lift=null` 且返回 warning
+- MVP 实现口径:
+  - 采用“预计算 + 实时聚合”混合策略:
+    - 预计算（或缓存）模型前向得到的 `activations(I)`（按 `scope` 分开）
+    - 可额外缓存 `max_t I_{n,p,t}` 以加速触发率统计
+    - `trigger` 不预存固定结果；在请求时按当前 `omega` 计算
+    - 滑动 `omega` 时仅做阈值化与聚合重算，不重复模型前向
+  - 目标: 保持交互响应速度，同时保证统计口径一致
+- 已知问题:
+  - 不同数据集的 `I` 数值范围可能差异较大；跨数据集直接比较同一 `omega` 不具可比性
+  - `scope=train` 统计可能偏乐观，仅用于诊断，不作为默认对外结论
+  - 小样本类别下 `class_trigger_rate/lift` 方差较大；当前通过 `alpha=1.0` 与 `min_support=20` 缓解，但仍需 warning 提示
+  - `global` 直方图会掩盖单个 shapelet 差异，默认应使用 `per_shapelet` 视图
+  - Part B -> Part C 联动字段仍为留存项，待 Part C 实现时冻结
 
 ## 2.3 Part C: Match & Locate Panel
 - 输入: 单样本 `x[t,d]`, `I[p,t]`, `peak_t[p]`
@@ -161,6 +209,59 @@
   - `IoU >= merge_iou` 可合并
 - 输出:
   - `players` 和并集时间集合 `T(G')`
+
+## 3.4 Part B 统计输入口径（冻结）
+- 输出分层约束:
+  - `gallery` 仅包含阈值无关字段
+  - `global_trigger_rate / class_trigger_rate` 仅在 `stats` 中返回，且必须依赖并回传 `omega`
+- 统计范围:
+  - 默认 `scope = test`
+  - `scope = train` 仅用于训练行为诊断
+  - `scope = all` 仅用于探索，不作为默认对比或验收口径
+- 统计粒度:
+  - 样本级统计（默认主指标）:
+    - 触发定义: `trigger_{n,p} = 1{max_t I_{n,p,t} >= Omega}`
+    - 用于计算触发率、类别覆盖、lift 等
+  - 时间点级统计（默认细节视图）:
+    - 使用 `I[p,t]` 在时间轴上的分布，用于直方图/热区展示
+- 计算策略:
+  - 底层前向阶段只负责产出 `activations(I)`，不固定产出某个 `omega` 下的 trigger 统计
+  - 不在 `omega` 交互时重复模型前向
+  - 通过预计算或缓存的 `I`（可含 `max_t I`）在服务端做阈值化和聚合
+  - `trigger` 由服务端按请求参数实时计算: `trigger_{n,p}(Omega) = 1{max_t I_{n,p,t} >= Omega}`
+  - `omega` 调整属于解释后处理: 不触发训练、不更新模型权重，仅重算 B/C/D 的统计与可视化派生结果
+  - 响应中必须回传 `scope`、`granularity`、`omega` 以保证可追溯
+- 类别覆盖与不平衡修正（冻结）:
+  - 记号:
+    - `N`: 当前 `scope` 的样本数
+    - `C`: 类别数
+    - `N_c = Σ_n 1(y_n = c)`
+    - `N_{p,trig} = Σ_n 1(trigger_{n,p}=1)`
+    - `N_{p,c} = Σ_n 1(trigger_{n,p}=1 and y_n=c)`
+  - 统计量:
+    - 全局触发率: `global_trigger_rate(p) = N_{p,trig} / N`
+    - 按类触发率: `class_trigger_rate(p,c) = N_{p,c} / N_c`
+    - 类别覆盖率: `class_coverage(p,c) = N_{p,c} / N_c`
+  - 不平衡修正（lift）:
+    - 先验: `P(y=c) = (N_c + alpha) / (N + C*alpha)`
+    - 条件概率: `P(y=c | trigger_p=1) = (N_{p,c} + alpha) / (N_{p,trig} + C*alpha)`
+    - `lift(p,c) = P(y=c | trigger_p=1) / P(y=c)`
+  - 默认稳健参数:
+    - `alpha = 1.0`（Laplace 平滑）
+    - `min_support = 20`；当 `N_{p,trig} < min_support` 时 `lift` 标记为不稳定（返回 `null` 并附 warning）
+- `I` 直方图口径（冻结）:
+  - 视图模式:
+    - 默认 `mode = per_shapelet`（单个 shapelet 直方图）
+    - 可切换 `mode = global`（全局汇总，所有 shapelet 合并）
+  - 统计对象:
+    - `per_shapelet`: 使用当前 `shapelet_id` 的 `I_{n,p,t}`
+    - `global`: 使用当前 `scope` 下所有 `I_{n,p,t}`
+  - 默认参数:
+    - `bins = 50`
+    - 范围默认按当前统计对象的最小值/最大值确定（可通过参数覆写）
+    - 归一化默认开启（density）
+  - 响应回显:
+    - 必须回传 `hist_mode`, `bins`, `range`, `density`, `scope`
 
 ## 3.5 扰动函数（SDSL what-if）
 - 价值函数:
@@ -254,7 +355,7 @@
   - `explainResult`
 - 联动规则:
   - Part A 选样本 -> 刷新 C/D/E
-  - Part B 点 shapelet -> C 高亮并 pin
+  - Part B 点 shapelet -> C 高亮并 pin（留存项，待 Part C 实现时冻结字段与交互细节）
   - Part D 改 `omega` -> players 重算并清空旧 shapley
 
 ## 7. 性能与工程约束
@@ -285,7 +386,7 @@
   - 后续改进空间: 可增加 `zero`、`dataset_mean`、局部样本库插值、类条件 baseline，并比较不同 baseline 对 what-if / Shapley 稳定性的影响
 - R4: Shapley 输出口径在 v1 中以前端展示友好的 `prob` 为主，后端保留 `logit` 作为可选参数
   - 后续改进空间: 可增加 `prob` 与 `logit` 双输出对照视图，并评估不同口径下归因排序的一致性
-- R5: Part B 的类别不平衡修正在 v1 中采用 `lift`
+- R5: Part B 的类别不平衡修正在 v1 中采用 `lift`（`alpha=1.0` 的 Laplace 平滑，`min_support=20`）
   - 后续改进空间: 可补充 `PMI`、加权 lift、置信区间或显著性检验，用于减少小样本类别的统计波动
 - R6: 在线训练完全移出首版；v1 只支持加载已有 checkpoint 做推理、匹配、players 构建与解释计算
   - 后续改进空间: 可在后续版本增加异步训练任务、训练进度查询、训练结果版本管理与训练后自动刷新可视分析结果
