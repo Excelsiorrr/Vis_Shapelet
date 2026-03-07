@@ -1,16 +1,56 @@
 import os
+import sys
 import torch
 from txai.synth_data.generate_spikes import SpikeTrainDataset
 from txai.baselines.FIT.data_generator.data.clean_state_data import StateTrainDataset
 
 spike_path = '/home/owq978/TimeSeriesXAI/datasets/Spike/'
+
+
+def _register_legacy_pickle_aliases() -> None:
+    """
+    Register legacy class aliases for .pt files pickled under "__main__".
+
+    Some historical dataset files were saved from scripts where dataset classes
+    lived in __main__. During unpickling, torch.load resolves by module+class
+    name and fails if "__main__.SynthTrainDataset" is unavailable.
+    """
+    main_mod = sys.modules.get("__main__")
+    if main_mod is None:
+        return
+
+    if not hasattr(main_mod, "SynthTrainDataset"):
+        try:
+            from get_data import SynthTrainDataset as GD_SynthTrainDataset
+            setattr(main_mod, "SynthTrainDataset", GD_SynthTrainDataset)
+        except Exception:
+            try:
+                from txai.synth_data.synth_data_base import SynthTrainDataset as BaseSynthTrainDataset
+                setattr(main_mod, "SynthTrainDataset", BaseSynthTrainDataset)
+            except Exception:
+                pass
+
+    if not hasattr(main_mod, "SynthTrainDataset_Batch_first"):
+        try:
+            from get_data import SynthTrainDataset_Batch_first
+            setattr(main_mod, "SynthTrainDataset_Batch_first", SynthTrainDataset_Batch_first)
+        except Exception:
+            pass
+
+
+def _safe_torch_load(path: str):
+    # Ensure legacy aliases exist before unpickling custom dataset objects.
+    _register_legacy_pickle_aliases()
+    return torch.load(path, weights_only=False)
+
+
 def process_Synth(split_no = 1, device = None, base_path = spike_path, regression = False,
         label_noise = None):
 
     split_path = os.path.join(base_path, 'split={}.pt'.format(split_no))
     print("split_path：", split_path)
 
-    D = torch.load(split_path)
+    D = _safe_torch_load(split_path)
 
     D['train_loader'].X = D['train_loader'].X.float().to(device)
     D['train_loader'].times = D['train_loader'].times.float().to(device)
@@ -76,7 +116,7 @@ def process_Synth_named(dataset_name: str, device = None,
         split_path = os.path.join(base_path, f'split={split_no}.pt')
 
     print('split_path：', split_path)
-    D = torch.load(split_path, weights_only=False)
+    D = _safe_torch_load(split_path)
 
     # Align dtypes/devices as in process_Synth
     D['train_loader'].X = D['train_loader'].X.float().to(device)
