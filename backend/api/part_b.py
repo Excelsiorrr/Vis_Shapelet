@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Query
+
+from backend.services.part_b_service import PartBService
+from backend.schemas.part_b import (
+    ShapeletClassStatsResponse,
+    ShapeletDetailResponse,
+    ShapeletGalleryListResponse,
+    ShapeletHistogramResponse,
+    ShapeletLibraryMetaResponse,
+    ShapeletStatsSummaryResponse,
+)
+
+
+service = PartBService()
+router = APIRouter(prefix="/api/v1/part-b", tags=["Part B"])
+
+
+@router.get("/datasets/{dataset_name}/meta", response_model=ShapeletLibraryMetaResponse)
+def get_part_b_meta(dataset_name: str) -> ShapeletLibraryMetaResponse:
+    return service.get_meta(dataset_name)
+
+
+@router.get("/datasets/{dataset_name}/shapelets", response_model=ShapeletGalleryListResponse)
+def list_shapelets(
+    dataset_name: str,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> ShapeletGalleryListResponse:
+    return service.list_shapelets(dataset_name, offset, limit)
+
+
+@router.get("/datasets/{dataset_name}/shapelets/{shapelet_id}", response_model=ShapeletDetailResponse)
+def get_shapelet_detail(dataset_name: str, shapelet_id: str) -> ShapeletDetailResponse:
+    return service.get_shapelet_detail(dataset_name, shapelet_id)
+
+
+@router.get("/datasets/{dataset_name}/shapelets/{shapelet_id}/stats/summary", response_model=ShapeletStatsSummaryResponse)
+def get_shapelet_stats_summary(
+    dataset_name: str,
+    shapelet_id: str,
+    scope: str = Query(default="test"),
+    omega: float = Query(default=0.1),
+) -> ShapeletStatsSummaryResponse:
+    return service.get_stats_summary(dataset_name, shapelet_id, scope, omega)
+
+
+@router.get("/datasets/{dataset_name}/shapelets/stats/histogram", response_model=ShapeletHistogramResponse)
+def get_shapelet_histogram(
+    dataset_name: str,
+    scope: str = Query(default="test"),
+    hist_mode: str = Query(default="per_shapelet"),
+    shapelet_id: str | None = Query(default=None),
+    bins: int = Query(default=50, ge=5, le=500),
+    density: bool = Query(default=True),
+    range_min: float | None = Query(default=None),
+    range_max: float | None = Query(default=None),
+) -> ShapeletHistogramResponse:
+    return service.get_histogram(dataset_name, scope, hist_mode, shapelet_id, bins, density, range_min, range_max)
+
+
+@router.get("/datasets/{dataset_name}/shapelets/{shapelet_id}/stats/classes", response_model=ShapeletClassStatsResponse)
+def get_shapelet_class_stats(
+    dataset_name: str,
+    shapelet_id: str,
+    scope: str = Query(default="test"),
+    omega: float = Query(default=0.1),
+) -> ShapeletClassStatsResponse:
+    return service.get_class_stats(dataset_name, shapelet_id, scope, omega)
