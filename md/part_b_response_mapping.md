@@ -15,6 +15,7 @@
 | `GET /api/v1/part-b/datasets/{dataset_name}/shapelets/{shapelet_id}/stats/summary?scope=...&omega=...` | `ShapeletStatsSummaryResponse` | `SupportSummary` `dict[str,float]` `dict[str,float|null]` `ApiWarning[]` | 单个 shapelet 动态统计摘要 |
 | `GET /api/v1/part-b/datasets/{dataset_name}/shapelets/stats/histogram?scope=...&hist_mode=...&shapelet_id=...&bins=...&density=...` | `ShapeletHistogramResponse` | `counts: float[]` `bin_edges: float[]` `ApiWarning[]` | `I` 分布直方图（per_shapelet/global） |
 | `GET /api/v1/part-b/datasets/{dataset_name}/shapelets/{shapelet_id}/stats/classes?scope=...&omega=...` | `ShapeletClassStatsResponse` | `ShapeletClassStatsItem[]` `ApiWarning[]` | 单个 shapelet 按类统计明细 |
+| `GET /api/v1/part-b/datasets/{dataset_name}/shapelets/{shapelet_id}/samples/top-hits?scope=...&omega=...&offset=...&limit=...&rank_metric=...` | `ShapeletTopHitsResponse` | `TopHitSampleItem[]` `ApiWarning[]` | B->C 联动样本来源（契约冻结，待实现） |
 
 ## 2. 类型说明
 
@@ -77,6 +78,7 @@
 - 说明:
   - 这是静态对象，不受 `omega` 变化影响
   - `sample_ids_preview` 当前后端通常返回空数组，前端需容错
+  - `sample_ids_preview` 仅用于预览，不作为 B->C 正式跳转数据源
 
 ### 2.3 动态统计摘要
 
@@ -150,6 +152,48 @@
   - `coverage`
   - `lift`
 
+### 2.6 B->C 联动样本（契约冻结）
+
+#### `ShapeletTopHitsResponse`
+- 对应接口:
+  - `GET /api/v1/part-b/datasets/{dataset_name}/shapelets/{shapelet_id}/samples/top-hits?scope=...&omega=...&offset=...&limit=...&rank_metric=...`
+- 结构:
+  - `spec_version`
+  - `dataset`
+  - `shapelet_id`
+  - `scope`
+  - `omega`
+  - `total`
+  - `offset`
+  - `limit`
+  - `rank_metric`
+  - `items: TopHitSampleItem[]`
+  - `warnings: ApiWarning[]`
+
+#### `TopHitSampleItem`
+- 典型字段:
+  - `sample_id`
+  - `trigger_score`
+  - `rank`
+  - `label`
+  - `pred_class`
+  - `margin`
+
+#### `PartBToCLink`（前端导航对象）
+- 必带字段:
+  - `dataset`
+  - `sample_id`
+  - `shapelet_id`
+  - `scope`
+  - `omega`
+  - `source_panel='part_b'`
+- 可选字段:
+  - `trigger_score`
+  - `rank`
+  - `rank_metric`
+- 说明:
+  - 禁止仅凭 `shapelet_id` 跳转 Part C，必须携带 `sample_id`
+
 ## 3. 两个容易混淆的点
 
 ### 3.1 `ShapeletStatsSummaryResponse` 和 `ShapeletClassStatsResponse` 不是一回事
@@ -181,9 +225,14 @@
    - `GET /api/v1/part-b/datasets/{dataset_name}/shapelets/{shapelet_id}/stats/summary?scope=test&omega=0.1`
    - `GET /api/v1/part-b/datasets/{dataset_name}/shapelets/stats/histogram?scope=test&hist_mode=per_shapelet&shapelet_id={shapelet_id}&bins=50&density=true`
    - `GET /api/v1/part-b/datasets/{dataset_name}/shapelets/{shapelet_id}/stats/classes?scope=test&omega=0.1`
+   - `GET /api/v1/part-b/datasets/{dataset_name}/shapelets/{shapelet_id}/samples/top-hits?scope=test&omega=0.1&offset=0&limit=20&rank_metric=max_i`（契约冻结，待实现）
 4. 用户调整 `omega` 时，仅刷新:
    - `stats/summary`
    - `stats/histogram`
    - `stats/classes`
+   - `samples/top-hits`
 5. 用户翻页列表时，仅刷新:
    - `shapelets?offset=...&limit=...`
+6. 用户执行 B->C 跳转时，使用 `PartBToCLink` 组装路由参数:
+   - 必带: `dataset + sample_id + shapelet_id + scope + omega + source_panel`
+   - 可选: `trigger_score + rank + rank_metric`

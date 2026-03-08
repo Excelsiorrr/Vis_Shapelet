@@ -18,6 +18,13 @@
   - 不提供 `/overview` 或等价全量打包接口
   - `omega` 调整只触发解释后处理统计重算，不触发训练，不修改模型参数
   - 默认 `scope=test`，并在响应中回显 `scope/omega`
+  - v1 采用统一全局 `omega` 口径，联动 Part C/Part D；历史固定阈值常量（`0.5/0.4`）不再作为业务口径
+  - `omega_default` 单一真源为解释配置（`players.omega`，可按数据集覆盖），不得复用 `margin_threshold`
+  - `Part B -> Part C` 联动契约已冻结:
+    - 必带字段: `dataset`, `sample_id`, `shapelet_id`, `scope`, `omega`, `source_panel='part_b'`
+    - 可选字段: `trigger_score`, `rank`, `rank_metric`
+    - 禁止仅凭 `shapelet_id` 跳转 Part C，必须携带具体 `sample_id`
+    - `sample_id` 的唯一正式来源是 `top-hits` 接口；`sample_ids_preview` 仅用于预览
 
 ## 1.2 核心对象 Schema
 
@@ -114,6 +121,39 @@
     "omega": "float",
     "items": "ShapeletClassStatsItem[]",
     "warnings": "ApiWarning[]"
+  },
+  "TopHitSampleItem": {
+    "sample_id": "string",
+    "trigger_score": "float",
+    "rank": "int",
+    "label": "int|null",
+    "pred_class": "int|null",
+    "margin": "float|null"
+  },
+  "ShapeletTopHitsResponse": {
+    "spec_version": "string",
+    "dataset": "string",
+    "shapelet_id": "string",
+    "scope": "test|train|all",
+    "omega": "float",
+    "total": "int",
+    "offset": "int",
+    "limit": "int",
+    "rank_metric": "max_i|trigger_score",
+    "items": "TopHitSampleItem[]",
+    "warnings": "ApiWarning[]"
+  },
+  "PartBToCLink": {
+    "dataset": "string",
+    "sample_id": "string",
+    "shapelet_id": "string",
+    "shapelet_len": "int|null",
+    "scope": "test|train|all",
+    "omega": "float",
+    "source_panel": "part_b",
+    "trigger_score": "float|null",
+    "rank": "int|null",
+    "rank_metric": "max_i|trigger_score|null"
   }
 }
 ```
@@ -145,7 +185,7 @@
   - `spec_version`: 接口契约版本号，前端可用于兼容性检查。
   - `dataset`: 当前数据集名称，用于页面标题、路由状态或请求参数回显。
   - `scope_default`: 默认统计范围，当前后端默认返回 `test`。
-  - `omega_default`: 默认触发阈值，通常作为阈值滑条初始值。
+  - `omega_default`: 默认触发阈值，来自解释配置 `players.omega`，用于阈值滑条初始值。
   - `trigger_rule`: 触发规则公式字符串，用于帮助文案或 tooltip。
   - `histogram_default`: 直方图默认配置对象。
   - `warnings`: 与当前数据集相关的告警列表。
@@ -178,6 +218,9 @@
   - `ckpt_id`: 模型 checkpoint 标识，用于展示模型来源或调试信息。
   - `prototype`: shapelet 原型序列，形状 `L x D`，可用于绘制波形预览。
   - `sample_ids_preview`: 样本 id 预览列表，当前后端可能返回空数组，前端应容错处理。
+  - 说明:
+    - `sample_ids_preview` 仅用于轻量预览，不作为 B->C 跳转的正式数据源。
+    - 正式跳转必须使用 `top-hits` 接口返回的 `sample_id + trigger_score + rank`。
 
 ### ShapeletGalleryListResponse
 - 这是什么:
@@ -301,6 +344,42 @@
   - `items`: 按类别统计明细数组，元素类型为 `ShapeletClassStatsItem`。
   - `warnings`: 告警信息列表。
 
+### TopHitSampleItem
+- 这是什么:
+  - 单个 shapelet 在给定 `scope + omega` 下的高触发样本条目。
+- 一般出现在哪:
+  - `ShapeletTopHitsResponse.items[]`
+- 前端通常怎么用:
+  - 作为 Part B -> Part C 跳转前的样本选择列表。
+  - 选中条目后按冻结契约组装跳转参数。
+- 字段说明:
+  - `sample_id`: 目标样本 id（B->C 必带）。
+  - `trigger_score`: 当前 shapelet 在该样本上的触发分数。
+  - `rank`: 当前排序下名次（1-based）。
+  - `label/pred_class/margin`: 可选辅助展示字段。
+
+### ShapeletTopHitsResponse
+- 这是什么:
+  - 单个 shapelet 的高触发样本分页响应（联动专用）。
+- 一般出现在哪:
+  - `GET /api/v1/part-b/datasets/{dataset_name}/shapelets/{shapelet_id}/samples/top-hits?...` 的响应体。
+- 前端通常怎么用:
+  - 在 Part B 中先选样本，再触发跳转到 Part C。
+  - 与 `summary/classes` 使用同一 `scope + omega`，保证口径一致。
+
+### PartBToCLink
+- 这是什么:
+  - 从 Part B 跳转 Part C 的冻结参数对象。
+- 前端通常怎么用:
+  - 作为路由 query 或导航 state 统一结构。
+- 字段说明:
+  - `dataset/sample_id/shapelet_id/scope/omega/source_panel` 为必填核心字段。
+  - `trigger_score/rank/rank_metric` 为可选追溯字段。
+  - `shapelet_len` 为可选加速字段；Part C 计算高亮窗口时长度来源优先级为:
+    - 优先 `match` 响应中的 `shapelet_lens`
+    - 次选 `PartBToCLink.shapelet_len`
+    - 兜底读取 `shapelet detail/meta`
+
 ## 1.3 端点列表
 
 ### 0) 获取 Part B 首屏基础信息
@@ -397,7 +476,25 @@
   - `scope`: 统计范围，`test|train|all`。
   - `omega`: 触发阈值。
 
+### 6) 获取单个 shapelet 的高触发样本列表（用于 B->C 联动）
+- `GET /api/v1/part-b/datasets/{dataset_name}/shapelets/{shapelet_id}/samples/top-hits?scope=test&omega=0.1&offset=0&limit=20&rank_metric=max_i`
+- 返回:
+  - `ShapeletTopHitsResponse`
+- 说明:
+  - 该接口是 `Part B -> Part C` 的正式样本来源接口。
+  - 当前若后端尚未实现，可按本契约先 mock，字段语义不再变更（联动契约冻结）。
+- 前端理解:
+  - 先请求该接口拿到候选样本，用户选中后再按 `PartBToCLink` 跳转 Part C。
+  - `scope + omega` 必须与当前 B 页面状态一致，避免口径漂移。
+- 参数说明:
+  - `dataset_name`: 数据集名称。
+  - `shapelet_id`: 目标 shapelet 标识符。
+  - `scope`: 统计范围，`test|train|all`。
+  - `omega`: 触发阈值。
+  - `offset/limit`: 分页参数。
+  - `rank_metric`: 排序指标，默认 `max_i`。
+
 ## 2. 推荐请求流
-- `meta -> gallery list -> (shapelet detail + stats summary + histogram + class stats)`
-- `omega` 变化仅刷新 `stats` 相关接口（summary / histogram / class stats）
+- `meta -> gallery list -> (shapelet detail + stats summary + histogram + class stats + top-hits)`
+- `omega` 或 `scope` 变化时，仅刷新 `stats` 相关接口（summary / histogram / class stats）与 `top-hits`
 - `offset/limit` 变化仅刷新 gallery list
