@@ -4,6 +4,8 @@ from fastapi import APIRouter
 
 from backend.schemas.part_c import (
     MatchTensorResponse,
+    PartCFromPartERequest,
+    PartCFromPartEResponse,
     PartCFromPartBRequest,
     PartCFromPartBResponse,
     PartCMatchRequest,
@@ -29,6 +31,16 @@ def get_match_tensor(dataset_name: str, sample_id: str, request: PartCMatchReque
 @router.post("/navigation/from-part-b", response_model=PartCFromPartBResponse)
 def from_part_b_navigation(request: PartCFromPartBRequest) -> PartCFromPartBResponse:
     return service.from_part_b_navigation(
+        request.link,
+        include_sequence=request.include_sequence,
+        include_prediction=request.include_prediction,
+        include_windows=request.include_windows,
+    )
+
+
+@router.post("/navigation/from-part-e", response_model=PartCFromPartEResponse)
+def from_part_e_navigation(request: PartCFromPartERequest) -> PartCFromPartEResponse:
+    return service.from_part_e_navigation(
         request.link,
         include_sequence=request.include_sequence,
         include_prediction=request.include_prediction,

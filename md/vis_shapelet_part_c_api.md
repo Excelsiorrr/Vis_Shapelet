@@ -24,11 +24,16 @@
     - `start = peak_t - floor(L/2)`
     - `end = start + L - 1`
     - 最终裁剪到 `[0, T-1]`
-  - 证据高亮阈值统一使用全局 `omega`（与 Part B/Part D 一致）
+  - 证据高亮阈值统一使用全局 `omega`（与 Part B/Part E 一致）
   - `Part B -> Part C` 联动契约冻结:
     - 必带字段: `dataset`, `sample_id`, `shapelet_id`, `scope`, `omega`, `source_panel='part_b'`
     - 可选字段: `trigger_score`, `rank`, `rank_metric`
     - 禁止仅凭 `shapelet_id` 跳转 Part C，必须携带具体 `sample_id`
+  - `Part E -> Part C` 回跳契约冻结:
+    - 必带字段: `dataset`, `sample_id`, `shapelet_id`, `t_start`, `t_end`, `scope`, `omega`, `source_panel='part_e'`
+    - 可选字段: `baseline`, `value_type`, `target_class`
+    - `span=[t_start,t_end]` 为闭区间（0-based，含两端）
+    - 禁止仅凭 `shapelet_id` 回跳 Part C，必须携带具体 `sample_id + span`
   - Part C 支持的 `scope`（冻结）:
     - 仅支持 `test|train`，不开放 `all`
     - 当接收到 `scope=all` 时返回 `400 ERR_INVALID_SCOPE`
@@ -62,7 +67,7 @@
   "PartCMetaResponse": {
     "spec_version": "string",
     "dataset": "string",
-    "scope_default": "test|train|all",
+    "scope_default": "test|train",
     "omega_default": "float",
     "time_index_base": "0",
     "peak_alignment": "center",
@@ -142,6 +147,32 @@
     "resolved_match_request": "PartCMatchRequest",
     "match": "MatchTensorResponse",
     "warnings": "ApiWarning[]"
+  },
+  "PartEToCLink": {
+    "dataset": "string",
+    "sample_id": "string",
+    "shapelet_id": "string",
+    "t_start": "int",
+    "t_end": "int",
+    "scope": "test|train",
+    "omega": "float",
+    "source_panel": "part_e",
+    "baseline": "linear_interp|zero|dataset_mean|null",
+    "value_type": "prob|logit|null",
+    "target_class": "int|null"
+  },
+  "PartCFromPartERequest": {
+    "link": "PartEToCLink",
+    "include_sequence": "bool",
+    "include_prediction": "bool",
+    "include_windows": "bool"
+  },
+  "PartCFromPartEResponse": {
+    "spec_version": "string",
+    "link": "PartEToCLink",
+    "resolved_match_request": "PartCMatchRequest",
+    "match": "MatchTensorResponse",
+    "warnings": "ApiWarning[]"
   }
 }
 ```
@@ -183,7 +214,7 @@
   - 记录 score 语义，避免把 `I` 误认为概率值。
 - 字段说明:
   - `scope_default`: 默认统计范围，推荐 `test`。
-  - `omega_default`: 默认证据阈值，与 Part B/Part D 统一。
+  - `omega_default`: 默认证据阈值，与 Part B/Part E 统一。
   - `time_index_base`: 时间索引基准，固定 `0`。
   - `peak_alignment`: 固定 `center`，指明 `peak_t` 口径。
   - `match_score_semantics`: `I` 的语义说明（模型原生匹配分数）。
@@ -287,6 +318,23 @@
   - 作为 C 页首屏一次请求结果，减少串行等待。
   - 用 `resolved_match_request` 对照当前页面状态，保证口径一致。
 
+### PartEToCLink
+- 这是什么:
+  - 从 Part E 回跳 Part C 的冻结导航对象。
+- 一般出现在哪:
+  - `PartCFromPartERequest.link`。
+- 前端通常怎么用:
+  - 把 what-if 页当前上下文（样本、shapelet、span、口径）完整带回 C 复核。
+- 字段说明:
+  - `dataset/sample_id/shapelet_id/t_start/t_end/scope/omega/source_panel` 为必填。
+  - `baseline/value_type/target_class` 为可选透传字段（用于 UI 回显，不影响 Match 主计算）。
+
+### PartCFromPartERequest / PartCFromPartEResponse
+- 这是什么:
+  - Part E -> Part C 的聚合加载请求/响应。
+- 前端通常怎么用:
+  - 回跳时优先用聚合接口，避免前端重复拼接 `matches` 请求。
+
 ## 1.3 端点列表
 
 ### 0) 获取 Part C 首屏基础信息
@@ -351,11 +399,24 @@
   - 已有 B->C 冻结字段时，优先使用该聚合接口可降低联动错误率。
   - 响应中的 `link` 与 `resolved_match_request` 可作为调试和埋点依据。
 
+### 3) Part E -> Part C 回跳聚合加载（v1 建议）
+- `POST /api/v1/part-c/navigation/from-part-e`
+- 请求体:
+  - `PartCFromPartERequest`
+- 返回:
+  - `PartCFromPartEResponse`
+- 说明:
+  - 用于承接 Part E 的 what-if 上下文并回到 C 做匹配复核。
+  - `t_start/t_end` 仅作为回跳上下文；`match` 计算仍以 `dataset/sample_id/scope/omega` 与 pin 逻辑为准。
+  - `link.scope=all` 时应返回 `400 ERR_INVALID_SCOPE`。
+
 ## 2. 推荐请求流
 - Part A -> Part C:
   - `meta -> matches`
 - Part B -> Part C（使用聚合接口）:
   - `meta -> navigation/from-part-b`
+- Part E -> Part C（回跳复核）:
+  - `meta -> navigation/from-part-e`
 - 交互刷新建议:
   - `omega` 变化:
     - 仅刷新 `matches`（不重拉 `meta`）

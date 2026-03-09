@@ -98,3 +98,32 @@ class PartCFromPartBResponse(BaseModel):
     resolved_match_request: PartCMatchRequest
     match: MatchTensorResponse
     warnings: list[ApiWarning] = Field(default_factory=list)
+
+
+class PartEToCLink(BaseModel):
+    dataset: str
+    sample_id: str
+    shapelet_id: str
+    t_start: int
+    t_end: int
+    scope: str
+    omega: float
+    source_panel: str = "part_e"
+    baseline: str | None = None
+    value_type: str | None = None
+    target_class: int | None = None
+
+
+class PartCFromPartERequest(BaseModel):
+    link: PartEToCLink
+    include_sequence: bool = True
+    include_prediction: bool = True
+    include_windows: bool = True
+
+
+class PartCFromPartEResponse(BaseModel):
+    spec_version: str = SPEC_VERSION
+    link: PartEToCLink
+    resolved_match_request: PartCMatchRequest
+    match: MatchTensorResponse
+    warnings: list[ApiWarning] = Field(default_factory=list)

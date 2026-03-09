@@ -17,9 +17,11 @@ from backend.schemas.part_c import (
     MatchParams,
     MatchTensorResponse,
     PartBToCLink,
+    PartCFromPartEResponse,
     PartCFromPartBResponse,
     PartCMatchRequest,
     PartCMetaResponse,
+    PartEToCLink,
     PinnedShapeletStatus,
 )
 from backend.services.part_a_service import PartAService, _to_numpy_2d
@@ -53,6 +55,26 @@ class PartCService:
         self.inference_device = self.part_a_service.inference_device
         self.scope_default = "test"
         self.omega_default = float(DEFAULT_MARGIN_THRESHOLD)
+
+    def _build_navigation_match_request(
+        self,
+        scope: str,
+        omega: float,
+        pinned_shapelet_id: str,
+        include_sequence: bool,
+        include_prediction: bool,
+        include_windows: bool,
+    ) -> PartCMatchRequest:
+        return PartCMatchRequest(
+            scope=scope,
+            omega=omega,
+            shapelet_ids=None,
+            topk_shapelets=None,
+            pinned_shapelet_id=pinned_shapelet_id,
+            include_sequence=include_sequence,
+            include_prediction=include_prediction,
+            include_windows=include_windows,
+        )
 
     def _validate_scope(self, scope: str) -> str:
         normalized = (scope or "").lower().strip()
@@ -345,14 +367,18 @@ class PartCService:
             warnings=warnings,
         )
 
-    def from_part_b_navigation(self, request_link: PartBToCLink, include_sequence: bool, include_prediction: bool, include_windows: bool) -> PartCFromPartBResponse:
+    def from_part_b_navigation(
+        self,
+        request_link: PartBToCLink,
+        include_sequence: bool,
+        include_prediction: bool,
+        include_windows: bool,
+    ) -> PartCFromPartBResponse:
         if request_link.source_panel != "part_b":
             raise _http_error(400, "ERR_INVALID_SOURCE_PANEL", "source_panel must be 'part_b'")
-        resolved_request = PartCMatchRequest(
+        resolved_request = self._build_navigation_match_request(
             scope=request_link.scope,
             omega=request_link.omega,
-            shapelet_ids=None,
-            topk_shapelets=None,
             pinned_shapelet_id=request_link.shapelet_id,
             include_sequence=include_sequence,
             include_prediction=include_prediction,
@@ -361,6 +387,35 @@ class PartCService:
         match = self.get_match_tensor(request_link.dataset, request_link.sample_id, resolved_request)
         warnings = list(match.warnings)
         return PartCFromPartBResponse(
+            link=request_link,
+            resolved_match_request=resolved_request,
+            match=match,
+            warnings=warnings,
+        )
+
+    def from_part_e_navigation(
+        self,
+        request_link: PartEToCLink,
+        include_sequence: bool,
+        include_prediction: bool,
+        include_windows: bool,
+    ) -> PartCFromPartEResponse:
+        if request_link.source_panel != "part_e":
+            raise _http_error(400, "ERR_INVALID_SOURCE_PANEL", "source_panel must be 'part_e'")
+        if request_link.t_start < 0 or request_link.t_end < 0 or request_link.t_start > request_link.t_end:
+            raise _http_error(400, "ERR_INVALID_SPAN", "span must satisfy 0 <= t_start <= t_end")
+
+        resolved_request = self._build_navigation_match_request(
+            scope=request_link.scope,
+            omega=request_link.omega,
+            pinned_shapelet_id=request_link.shapelet_id,
+            include_sequence=include_sequence,
+            include_prediction=include_prediction,
+            include_windows=include_windows,
+        )
+        match = self.get_match_tensor(request_link.dataset, request_link.sample_id, resolved_request)
+        warnings = list(match.warnings)
+        return PartCFromPartEResponse(
             link=request_link,
             resolved_match_request=resolved_request,
             match=match,
