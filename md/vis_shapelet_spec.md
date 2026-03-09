@@ -46,7 +46,7 @@
   - 用户传入的数据文件 `dataset_file`
   - 初版支持从内置数据集选择: `mitecg | mcce | mcch | mtce | mtch`
   - 聚类参数: `cluster_k`
-- 输出:
+  - 输出:
   - 数据集元信息（只读）: `sampling_rate`, `seq_len`
     - 其中 `sampling_rate` 表示时间粒度字符串，当前约定为 `hour|min|day|second|unknown`，含义是 `1 step = ?`
   - 训练元信息（只读）: `shapelet_num`, `shapelet_len`
@@ -89,7 +89,7 @@
     - `train`: 用于观察模型学习到的模式，允许偏乐观
     - `test`: 用于默认展示与对外解释，代表泛化表现
     - `all`: 用于探索分析，不作为默认评估口径
-  - 统计粒度 `granularity in {sample, time}`（默认主视图 `sample`）
+  - 统计粒度 `granularity in {sample, time}`（概念口径，v1 不作为 API 请求参数）
     - `sample`（样本级）: 回答“有多少样本触发该 shapelet / 与类别关系如何”
     - `time`（时间点级）: 回答“shapelet 在时间轴的活跃区间分布”
 - 输出:
@@ -100,23 +100,29 @@
     - 按类触发率 `class_trigger_rate`
     - 触发次数统计、类别覆盖统计（含类别不平衡修正）
     - `I` 分布直方图（默认单个 shapelet 视图）
-    - 统计口径回显: `scope`, `granularity`, `omega`
+    - 统计口径回显: `scope`, `omega`（`granularity` 在 v1 由接口类型隐式表达，不单独回显）
   - 接口拆分原则（禁止重型总接口）:
     - 首屏仅加载 `meta`（轻量、阈值无关）
     - `gallery list` 与 `gallery detail` 分开；列表必须分页
     - `stats summary`、`histogram`、`class stats` 分开按需异步请求
-    - 阈值 `omega` 变化时仅刷新 `stats` 相关接口，不重拉 `gallery/meta`
+    - `top-hits samples` 作为 B->C 联动专用接口，分页按需请求（唯一正式样本来源）
+    - 阈值 `omega` 或 `scope` 变化时，仅刷新 `stats` 相关接口与 `top-hits samples`，不重拉 `gallery/meta`
     - 不提供单一 `/overview` 或等价“全量打包”接口
   - 建议请求流:
-    - `meta -> gallery list -> (shapelet detail + stats summary + histogram + class stats)`
+    - `meta -> gallery list -> (shapelet detail + stats summary + histogram + class stats + top-hits samples)`
 - 交互:
-  - 选择 shapelet（与 Part C 的联动契约暂列为留存项，待 Part C 实现时冻结）
+  - 选择 shapelet 后，先拉取该 shapelet 的 `top-hits samples`，再选择样本进入 Part C
   - 阈值预览（边界冻结）:
     - 不触发训练流程
     - 不修改模型参数与 checkpoint
     - 仅影响 Part B / Part C / Part D 的统计与可视化结果
   - 支持切换 `scope`（默认 `test`）
   - `I` 直方图支持“单个 shapelet / 全局汇总”视图切换（默认单个 shapelet）
+  - B->C 联动契约（冻结）:
+    - 必带字段: `dataset`, `sample_id`, `shapelet_id`, `scope`, `omega`, `source_panel='part_b'`
+    - 可选字段: `trigger_score`, `rank`, `rank_metric`
+    - 禁止仅凭 `shapelet_id` 跳转 Part C，必须携带具体 `sample_id`
+    - `sample_id` 必须来自 `top-hits samples` 接口；`sample_ids_preview` 仅用于预览展示
 - 验收:
   - 可追溯性: 任一 `shapelet_id` 的统计结果可回溯到样本 ID 列表与计数过程
   - 一致性: 同一 `dataset + ckpt + scope + omega + seed` 下 `global_trigger_rate / class_trigger_rate / lift` 结果一致（误差 0）
@@ -124,6 +130,7 @@
   - 阈值交互时延: 仅重算 `stats` 时 500ms 内返回（P95，`T<=2000, P<=64`）
   - 分页正确性: `offset/limit` 下无重复、无漏项，排序稳定
   - 稳健性: 当 `N_{p,trig} < min_support` 时 `lift=null` 且返回 warning
+  - 联动正确性: `top-hits samples` 可稳定返回可跳转样本；B->C 跳转参数满足冻结契约
 - MVP 实现口径:
   - 采用“预计算 + 实时聚合”混合策略:
     - 预计算（或缓存）模型前向得到的 `activations(I)`（按 `scope` 分开）
@@ -136,18 +143,46 @@
   - `scope=train` 统计可能偏乐观，仅用于诊断，不作为默认对外结论
   - 小样本类别下 `class_trigger_rate/lift` 方差较大；当前通过 `alpha=1.0` 与 `min_support=20` 缓解，但仍需 warning 提示
   - `global` 直方图会掩盖单个 shapelet 差异，默认应使用 `per_shapelet` 视图
-  - Part B -> Part C 联动字段仍为留存项，待 Part C 实现时冻结
+  - `sample_ids_preview` 仅为轻量预览字段，不作为 B->C 正式跳转数据源
+  - 历史固定阈值常量路径（`shapeX.py` 中按数据集分支使用 `0.5/0.4`）已废弃；v1 统一由全局 `omega` 驱动 B/C/D
+
+- 默认值来源（冻结）:
+  - `omega_default` 的单一真源为解释配置（`players.omega`，可按数据集覆盖）
+  - `omega_default` 不得复用 `margin_threshold` 或其他分类指标阈值
 
 ## 2.3 Part C: Match & Locate Panel
 - 输入: 单样本 `x[t,d]`, `I[p,t]`, `peak_t[p]`
 - 输出:
   - 主图: 原始序列 + 证据高亮
   - 副图: `shapelet x time` heatmap
+- 页面入口与联动优先级（冻结）:
+  - 主入口: `Part A -> Part C`（先选样本再看匹配定位）
+  - 次入口: `Part B -> Part C`（先选 shapelet，再带样本进入定位）
+  - 复核入口: `Part E -> Part C`（从高贡献 segment 回看匹配合理性）
+- MVP 口径（冻结）:
+  - v1 不支持后端返回 `A`（softmax activation）；Part C 仅使用并展示 `I`
+  - 若前端需要“相对强度”视图，可在前端基于 `I` 做派生归一化显示，但该结果不作为模型原生输出口径
+  - 证据高亮阈值使用全局 `omega`（与 Part B/Part D 统一），不提供 Part C 局部覆盖阈值
+  - 时间定位按底层实现采用“中心对齐”:
+    - `peak_t` 是 center-aligned 索引，不是窗口起点
+    - 对应 shapelet 长度 `L_p` 的高亮窗口可按 `start = peak_t - floor(L_p/2)`, `end = start + L_p - 1` 计算，并在 `[0, T-1]` 内裁剪
+    - `L_p` 来源优先级（冻结）:
+      - 优先使用 `match` 响应携带的 `shapelet_len/shapelet_lens`（推荐）
+      - 若 `match` 未携带，则回退到 `shapelet detail/meta` 读取
+- Part B -> Part C 联动契约（冻结）:
+  - 必带字段: `dataset`, `sample_id`, `shapelet_id`, `scope`, `omega`, `source_panel='part_b'`
+  - 可选字段: `trigger_score`, `rank`, `rank_metric`
+  - 约束: Part B 不能仅凭 `shapelet_id` 直接跳转；必须携带具体 `sample_id`（例如 top-hit sample）
+- 跳转后的默认行为:
+  - 自动加载 `sample_id` 对应样本并 pin `shapelet_id`
+  - C 页沿用 B 传入的 `scope` 与 `omega`
+  - 首次进入 C 时自动定位到该 `shapelet_id` 的 `peak_t`
 - 交互:
   - hover 热力图单元定位原始曲线
   - 多选 shapelet 同屏展示
 - 验收:
   - 交互定位误差不超过 1 个时间步
+  - 同一 `dataset + sample_id + shapelet_id + scope + omega` 下，Part B 触发结论与 Part C 高亮结果一致
 
 ## 2.4 Part D: Players Builder Panel
 - 输入: `I[p,t]` 和阈值 `Omega`
@@ -179,7 +214,8 @@
 - 输入序列: `x in R^{T x D}`
 - shapelet 字典: `S in R^{P x L x D}`
 - 匹配分数: `I in R^{P x T}`（超界时间步按 padding 或忽略）
-- 峰值位置: `peak_t[p] = argmax_t I[p,t]`
+- 峰值位置: `peak_t[p] = argmax_t I[p,t]`，且 `peak_t` 定义为 center-aligned 时间索引（不是窗口起点）
+- `L_p`: 第 `p` 个 shapelet 的长度，用于把 `peak_t[p]` 映射为可视化高亮窗口
 - players: `player_i = (shapelet_id, t_start, t_end, score_summary)`
 
 ## 3.2 匹配分数 I（建议口径）
@@ -190,6 +226,7 @@
 - 统一约定:
   - `I` 是“模型原生匹配分数”，不是额外定义的纯原始距离
   - API 只暴露 `I`，不再单独暴露 `A`
+  - Part C 的热力图与证据高亮以 `I` 为唯一后端数据源
 - 默认配置:
   - `dist_measure='cosine'`
   - `shapelet_znorm=True`
@@ -218,11 +255,11 @@
   - 默认 `scope = test`
   - `scope = train` 仅用于训练行为诊断
   - `scope = all` 仅用于探索，不作为默认对比或验收口径
-- 统计粒度:
-  - 样本级统计（默认主指标）:
+- 统计粒度（概念口径，v1 不作为 API 参数）:
+  - 样本级统计（默认主指标，对应 `summary/classes` 接口）:
     - 触发定义: `trigger_{n,p} = 1{max_t I_{n,p,t} >= Omega}`
     - 用于计算触发率、类别覆盖、lift 等
-  - 时间点级统计（默认细节视图）:
+  - 时间点级统计（默认细节视图，对应 `histogram` 接口）:
     - 使用 `I[p,t]` 在时间轴上的分布，用于直方图/热区展示
 - 计算策略:
   - 底层前向阶段只负责产出 `activations(I)`，不固定产出某个 `omega` 下的 trigger 统计
@@ -230,7 +267,7 @@
   - 通过预计算或缓存的 `I`（可含 `max_t I`）在服务端做阈值化和聚合
   - `trigger` 由服务端按请求参数实时计算: `trigger_{n,p}(Omega) = 1{max_t I_{n,p,t} >= Omega}`
   - `omega` 调整属于解释后处理: 不触发训练、不更新模型权重，仅重算 B/C/D 的统计与可视化派生结果
-  - 响应中必须回传 `scope`、`granularity`、`omega` 以保证可追溯
+  - 响应中必须回传 `scope`、`omega` 以保证可追溯；`granularity` 在 v1 由接口类型隐式确定
 - 类别覆盖与不平衡修正（冻结）:
   - 记号:
     - `N`: 当前 `scope` 的样本数
@@ -355,7 +392,8 @@
   - `explainResult`
 - 联动规则:
   - Part A 选样本 -> 刷新 C/D/E
-  - Part B 点 shapelet -> C 高亮并 pin（留存项，待 Part C 实现时冻结字段与交互细节）
+  - Part B 进入 C 必须携带 `dataset + sample_id + shapelet_id + scope + omega`，C 自动 pin 对应 shapelet 并定位到 `peak_t`
+  - Part E 回跳 C 时必须携带 `sample_id` 与目标 `segment/span`（可附 `shapelet_id`），用于匹配复核
   - Part D 改 `omega` -> players 重算并清空旧 shapley
 
 ## 7. 性能与工程约束
@@ -390,6 +428,12 @@
   - 后续改进空间: 可补充 `PMI`、加权 lift、置信区间或显著性检验，用于减少小样本类别的统计波动
 - R6: 在线训练完全移出首版；v1 只支持加载已有 checkpoint 做推理、匹配、players 构建与解释计算
   - 后续改进空间: 可在后续版本增加异步训练任务、训练进度查询、训练结果版本管理与训练后自动刷新可视分析结果
+- R7: 阈值统一策略
+  - v1: 统一全局 `omega`，用于 Part B 统计、Part C 证据高亮、Part D players 生成
+  - v1: 历史固定阈值常量路径（`0.5/0.4`）不再作为业务口径，仅保留迁移期兼容说明
+- R8: `granularity` 参数化策略
+  - v1: `granularity` 仅作为概念口径，不作为 Part B API 的请求参数或回显字段
+  - v1.1 目标: 评估是否引入显式 `granularity` 参数（或聚合接口）以统一样本级/时间点级统计入口
 
 ## 10. 默认配置（可直接落地）
 

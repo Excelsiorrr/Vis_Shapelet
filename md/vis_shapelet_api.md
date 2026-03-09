@@ -311,33 +311,83 @@
 
 ```json
 {
-  "Sample": {
-    "id": "string",
-    "x": "float[T][D]",
-    "label": "int|null",
-    "meta": {
-      "sampling_rate_hz": "float",
-      "seq_len": "int",
-      "dataset": "string"
-    }
-  },
-  "Prediction": {
+  "PredictionSummary": {
     "pred_class": "int",
-    "logits": "float[C]",
     "probs": "float[C]",
     "margin": "float"
   },
-  "MatchTensor": {
+  "PartBToCLink": {
+    "dataset": "string",
     "sample_id": "string",
+    "shapelet_id": "string",
+    "shapelet_len": "int|null",
+    "scope": "test|train|all",
+    "omega": "float",
+    "source_panel": "part_b",
+    "trigger_score": "float|null",
+    "rank": "int|null",
+    "rank_metric": "max_i|trigger_score|null"
+  },
+  "PartCMatchRequest": {
+    "scope": "test|train",
+    "omega": "float",
+    "shapelet_ids": "string[]|null",
+    "topk_shapelets": "int|null",
+    "pinned_shapelet_id": "string|null",
+    "include_sequence": "bool",
+    "include_prediction": "bool",
+    "include_windows": "bool"
+  },
+  "HighlightWindow": {
+    "shapelet_id": "string",
+    "shapelet_len": "int",
+    "peak_t": "int",
+    "start": "int",
+    "end": "int",
+    "peak_score": "float",
+    "triggered": "bool"
+  },
+  "PinnedShapeletStatus": {
+    "shapelet_id": "string|null",
+    "is_present_in_tensor": "bool",
+    "peak_t": "int|null",
+    "triggered": "bool|null"
+  },
+  "MatchTensorResponse": {
+    "spec_version": "string",
+    "dataset": "string",
+    "sample_id": "string",
+    "split": "test|train",
+    "scope": "test|train",
+    "omega": "float",
     "shapelet_ids": "string[P]",
+    "shapelet_lens": "int[P]",
     "I": "float[P][T]",
     "peak_t": "int[P]",
+    "windows": "HighlightWindow[]|null",
+    "pinned_shapelet": "PinnedShapeletStatus",
+    "sequence": "float[T][D]|null",
+    "prediction": "PredictionSummary|null",
     "params": {
       "similarity_type": "string",
       "shapelet_temperature": "float",
       "normalize": "string",
       "score_semantics": "model_native_match_score"
-    }
+    },
+    "warnings": "ApiWarning[]"
+  },
+  "PartCFromPartBRequest": {
+    "link": "PartBToCLink",
+    "include_sequence": "bool",
+    "include_prediction": "bool",
+    "include_windows": "bool"
+  },
+  "PartCFromPartBResponse": {
+    "spec_version": "string",
+    "link": "PartBToCLink",
+    "resolved_match_request": "PartCMatchRequest",
+    "match": "MatchTensorResponse",
+    "warnings": "ApiWarning[]"
   },
   "Player": {
     "player_id": "string",
@@ -446,91 +496,46 @@
   - `sequence` 可直接用来画折线图或热图。
   - `suggested_window_len` 可作为前端初始时间窗或刷选长度默认值。
 
-### 1) 获取样本列表
-- `GET /samples?split=test&offset=0&limit=50`
-- 返回: `sample_id`, `label`, `meta`, 可选缩略统计
+### Part C 端点（草案，遵循 `/api/v1/part-*` 体系）
 
-### 2) 获取样本详情与预测
-- `GET /samples/{sample_id}/prediction?target_class=1`
-- 返回: `Sample + Prediction`
+#### 1) 获取单样本匹配张量（I）
+- `POST /api/v1/part-c/datasets/{dataset_name}/samples/{sample_id}/matches`
+- 请求体: `PartCMatchRequest`
+- 返回: `MatchTensorResponse`
+- 说明:
+  - `scope` 仅支持 `test|train`，不开放 `all`
+  - `shapelet_ids` 与 `topk_shapelets` 同时传入时，以 `shapelet_ids` 为准
+  - 当仅提供 `topk_shapelets` 时，按 `peak_score` 降序返回，分数并列按 `shapelet_id` 升序
 
-### 3) 获取匹配张量（I）
-- `POST /samples/{sample_id}/matches`
-- 请求:
-```json
-{
-  "shapelet_ids": ["s1", "s2"],
-  "similarity_type": "cosine",
-  "shapelet_temperature": 1.0,
-  "normalize": "znorm"
-}
-```
-- 返回: `MatchTensor`
+#### 2) Part B -> Part C 联动加载（v1 必做）
+- `POST /api/v1/part-c/navigation/from-part-b`
+- 说明:
+  - 请求体可使用 `PartCFromPartBRequest`（内部 `link` 使用 `PartBToCLink` 冻结字段: `dataset/sample_id/shapelet_id/scope/omega/source_panel`）。
+  - v1 要求实现该聚合接口。
+  - 当 `link.scope=all` 时，返回 `400 ERR_INVALID_SCOPE`。
 
-### 4) 由阈值生成 players
-- `POST /samples/{sample_id}/players:derive`
-- 请求:
-```json
-{
-  "I": "optional server-side ref",
-  "omega": 0.02,
-  "min_len": 5,
-  "fill_gap_len": 2,
-  "merge_iou": 0.6
-}
-```
-- 返回:
-```json
-{
-  "players": [],
-  "union_spans": [[10, 28], [72, 90]],
-  "stats": {
-    "n_players": 6
-  }
-}
-```
+### Part D 端点（草案，遵循 `/api/v1/part-*` 体系）
 
-### 5) what-if 评估
-- `POST /samples/{sample_id}/whatif:evaluate`
-- 请求:
-```json
-{
-  "coalition": ["p1", "p3"],
-  "target_class": 1,
-  "value_type": "prob",
-  "baseline": "linear_interp"
-}
-```
-- 返回:
-```json
-{
-  "p_original": 0.73,
-  "p_whatif": 0.81,
-  "delta": 0.08
-}
-```
+#### 3) 由阈值生成 players
+- `POST /api/v1/part-d/datasets/{dataset_name}/samples/{sample_id}/players:derive`
+- 返回: `players + union_spans + stats`
 
-### 6) Shapley 估计
-- `POST /samples/{sample_id}/shapley:estimate`
-- 请求:
-```json
-{
-  "players": ["p1", "p2", "p3"],
-  "target_class": 1,
-  "value_type": "prob",
-  "baseline": "linear_interp",
-  "min_perm": 64,
-  "max_perm": 512,
-  "stderr_tol": 0.01,
-  "seed": 2026
-}
-```
+### Part E 端点（草案，遵循 `/api/v1/part-*` 体系）
+
+#### 4) what-if 评估
+- `POST /api/v1/part-e/datasets/{dataset_name}/samples/{sample_id}/whatif:evaluate`
+- 返回: `p_original + p_whatif + delta`
+
+#### 5) Shapley 估计
+- `POST /api/v1/part-e/datasets/{dataset_name}/samples/{sample_id}/shapley:estimate`
 - 返回: `ExplainResult`
 
-### 7) shapelet 库查询（Part B）
-- `GET /shapelets?offset=0&limit=100`
-- `GET /shapelets/{shapelet_id}/stats?split=test`
+### 会话端点（草案，遵循 `/api/v1/part-*` 体系）
 
-### 8) 会话保存与回放
-- `POST /sessions`
-- `GET /sessions/{session_id}`
+#### 6) 会话保存与回放
+- `POST /api/v1/part-e/sessions`
+- `GET /api/v1/part-e/sessions/{session_id}`
+
+### 废弃说明
+- 旧草案路由 `/samples/*`、`/shapelets/*`、`/sessions/*` 不再作为 v1 契约的一部分。
+- v1 统一保留 `/api/v1/part-a/*`、`/api/v1/part-b/*`，以及后续补齐的 `/api/v1/part-c/*`、`/api/v1/part-d/*`、`/api/v1/part-e/*`。
