@@ -5,6 +5,7 @@
 - 说明:
   - 本文件承载接口契约、Schema、请求响应示例
   - PRD 与算法口径保留在 `vis_shapelet_spec.md`
+  - Part E 专属细化文档: `vis_shapelet_part_e_api.md`
 
 ## 4. API 契约（v1）
 
@@ -389,30 +390,44 @@
     "match": "MatchTensorResponse",
     "warnings": "ApiWarning[]"
   },
-  "Player": {
-    "player_id": "string",
+  "PartEWhatIfRequest": {
     "shapelet_id": "string",
-    "start": "int",
-    "end": "int",
-    "peak_score": "float",
-    "mean_score": "float"
+    "t_start": "int",
+    "t_end": "int",
+    "scope": "test|train",
+    "omega": "float",
+    "baseline": "linear_interp|zero|dataset_mean",
+    "value_type": "prob|logit",
+    "target_class": "int|null",
+    "seed": "int|null",
+    "include_perturbed_sequence": "bool"
   },
-  "ExplainResult": {
+  "PartEWhatIfResponse": {
+    "spec_version": "string",
+    "dataset": "string",
     "sample_id": "string",
-    "coalition": "string[player_id]",
+    "shapelet_id": "string",
+    "t_start": "int",
+    "t_end": "int",
+    "scope": "test|train",
+    "omega": "float",
+    "baseline": "linear_interp|zero|dataset_mean",
+    "value_type": "prob|logit",
+    "target_class": "int|null",
+    "seed": "int",
     "p_original": "float",
     "p_whatif": "float",
     "delta": "float",
-    "phi": "float[n_players]",
-    "stderr": "float[n_players]",
-    "saliency": "float[T]",
-    "config": {
-      "target_class": "int",
-      "value_type": "logit|prob",
-      "baseline": "linear_interp|zero|dataset_mean",
-      "seed": "int",
-      "perm_count": "int"
-    }
+    "delta_target": "float|null",
+    "pred_class_original": "int",
+    "pred_class_whatif": "int",
+    "y_true": "int|null",
+    "perturbed_sequence": "float[T][D]|null",
+    "warnings": "ApiWarning[]"
+  },
+  "ExplainResult": {
+    "status": "deprecated_for_v1",
+    "available_in": "v1.1+"
   }
 }
 ```
@@ -524,11 +539,27 @@
 
 #### 4) what-if 评估
 - `POST /api/v1/part-e/datasets/{dataset_name}/samples/{sample_id}/whatif:evaluate`
-- 返回: `p_original + p_whatif + delta`
+- 请求体: `PartEWhatIfRequest`
+- 返回: `PartEWhatIfResponse`
+- v1 冻结约束:
+  - 路径必填: `dataset_name/sample_id`
+  - 请求体必填: `shapelet_id/t_start/t_end/scope/omega`
+  - `span=[t_start,t_end]` 采用闭区间（0-based，含两端）
+  - `delta = p_whatif - p_original`
+  - 若请求携带 `target_class`，响应额外返回 `delta_target`
+- 错误码:
+  - `ERR_INVALID_SCOPE`
+  - `ERR_INVALID_OMEGA`
+  - `ERR_INVALID_SPAN`
+  - `ERR_SHAPELET_NOT_FOUND`
+  - `ERR_SAMPLE_NOT_FOUND`
+  - `SHAPELET_SPAN_MISMATCH`（warning，不中断）
 
-#### 5) Shapley 估计
+#### 5) Shapley 估计（v1.1+）
 - `POST /api/v1/part-e/datasets/{dataset_name}/samples/{sample_id}/shapley:estimate`
 - 返回: `ExplainResult`
+- 说明:
+  - 不属于 v1 必做范围；待 Part D players 稳定后恢复。
 
 ### 会话端点（草案，遵循 `/api/v1/part-*` 体系）
 

@@ -16,7 +16,7 @@
 - 目标3: 保证解释结果可复现（固定随机种子、固定口径、可回放会话）。
 
 ### 1.2 MVP 范围（首版）
-- 包含: `Part A + Part C + Part D + Part E` 的可用闭环。
+- 包含: `Part A + Part C + Part E` 的可用闭环（v1 暂不依赖 Part D）。
 - 包含: `Part B` 的只读能力（shapelet 浏览、分布统计、阈值调节）。
 - 不含: 在线训练和在线编辑 shapelet 原型（只加载 checkpoint）。
 - 不含: 多用户权限体系（先单用户/本地）。
@@ -35,9 +35,9 @@
 ### 1.5 验收标准（MVP）
 - A. 样本加载后，2 秒内返回基础预测与 margin。
 - B. 指定样本可展示 `I[p,t]` heatmap 与对应证据高亮。
-- C. 调整阈值 `Omega` 后，1 秒内重算 players（`T <= 2000, P <= 64`）。
+- C. 调整阈值 `Omega` 后，1 秒内完成单一 shapelet/segment 的 what-if 可视验证准备（`T <= 2000, P <= 64`）。
 - D. what-if 单次评估 1 秒内返回 `P(original), P(what-if), delta`。
-- E. Shapley 估计返回 `phi + stderr`，并记录采样配置与随机种子。
+- E. v1 不强制交付 Shapley；若启用实验开关，需返回采样配置与随机种子。
 
 ## 2. 页面需求拆解（PRD）
 
@@ -115,7 +115,7 @@
   - 阈值预览（边界冻结）:
     - 不触发训练流程
     - 不修改模型参数与 checkpoint
-    - 仅影响 Part B / Part C / Part D 的统计与可视化结果
+    - 仅影响 Part B / Part C / Part E 的统计与可视化结果
   - 支持切换 `scope`（默认 `test`）
   - `I` 直方图支持“单个 shapelet / 全局汇总”视图切换（默认单个 shapelet）
   - B->C 联动契约（冻结）:
@@ -144,10 +144,10 @@
   - 小样本类别下 `class_trigger_rate/lift` 方差较大；当前通过 `alpha=1.0` 与 `min_support=20` 缓解，但仍需 warning 提示
   - `global` 直方图会掩盖单个 shapelet 差异，默认应使用 `per_shapelet` 视图
   - `sample_ids_preview` 仅为轻量预览字段，不作为 B->C 正式跳转数据源
-  - 历史固定阈值常量路径（`shapeX.py` 中按数据集分支使用 `0.5/0.4`）已废弃；v1 统一由全局 `omega` 驱动 B/C/D
+  - 历史固定阈值常量路径（`shapeX.py` 中按数据集分支使用 `0.5/0.4`）已废弃；v1 统一由全局 `omega` 驱动 B/C/E
 
 - 默认值来源（冻结）:
-  - `omega_default` 的单一真源为解释配置（`players.omega`，可按数据集覆盖）
+  - `omega_default` 的单一真源为解释配置（`explain.omega`，可按数据集覆盖）
   - `omega_default` 不得复用 `margin_threshold` 或其他分类指标阈值
 
 ## 2.3 Part C: Match & Locate Panel
@@ -162,7 +162,7 @@
 - MVP 口径（冻结）:
   - v1 不支持后端返回 `A`（softmax activation）；Part C 仅使用并展示 `I`
   - 若前端需要“相对强度”视图，可在前端基于 `I` 做派生归一化显示，但该结果不作为模型原生输出口径
-  - 证据高亮阈值使用全局 `omega`（与 Part B/Part D 统一），不提供 Part C 局部覆盖阈值
+  - 证据高亮阈值使用全局 `omega`（与 Part B/Part E 统一），不提供 Part C 局部覆盖阈值
   - 时间定位按底层实现采用“中心对齐”:
     - `peak_t` 是 center-aligned 索引，不是窗口起点
     - 对应 shapelet 长度 `L_p` 的高亮窗口可按 `start = peak_t - floor(L_p/2)`, `end = start + L_p - 1` 计算，并在 `[0, T-1]` 内裁剪
@@ -184,6 +184,7 @@
   - 交互定位误差不超过 1 个时间步
   - 同一 `dataset + sample_id + shapelet_id + scope + omega` 下，Part B 触发结论与 Part C 高亮结果一致
 
+<!--
 ## 2.4 Part D: Players Builder Panel
 - 输入: `I[p,t]` 和阈值 `Omega`
 - 输出:
@@ -195,18 +196,51 @@
   - 合并/拆分建议（基于重叠率与最短长度）
 - 验收:
   - 同一输入和阈值下 players 完全可复现
+-->
 
-## 2.5 Part E: Perturbation & Shapley Panel
-- 输入: 原序列 + players + coalition `G'`
+## 2.5 Part E: Perturbation Panel（v1: 无 Part D 依赖）
+- 输入:
+  - 必填请求字段: `dataset`, `sample_id`, `shapelet_id`, `span=[t_start,t_end]`, `scope`, `omega`
+  - 可选请求字段: `baseline`（默认 `linear_interp`）, `value_type`（默认 `prob`）, `target_class`（默认不传）
+- `span` 定义（冻结）:
+  - `span=[t_start,t_end]` 是时间索引闭区间（含两端），单位为当前序列采样点 index
+  - 合法约束: `0 <= t_start <= t_end <= T-1`
+  - 越界处理: 服务端先裁剪到 `[0,T-1]` 再执行，并在响应回显裁剪后的区间
 - 输出:
-  - perturbed 序列
+  - perturbed 序列（或可选返回其摘要）
   - `P(original), P(what-if), delta`
-  - `phi_i`, `stderr_i`, 回填 saliency
+  - what-if 上下文回显（`dataset`, `sample_id`, `shapelet_id`, `t_start`, `t_end`, `scope`, `omega`, `baseline`, `value_type`, `seed`）
+  - 类别信息:
+    - 返回 `pred_class_original/pred_class_whatif`
+    - 若样本有标注则返回 `y_true`（仅展示，不作为 `target_class` 默认值）
+    - 若请求携带 `target_class`，额外返回 `delta_target`
+- segment 来源规则（冻结）:
+  - 优先使用前端明确传入的 `segment/span`
+  - 若未传入，则使用 Part C 当前 pin 的 `shapelet_id + peak_t + L_p` 推导窗口
+  - v1 不依赖 Part D 的 players/coalition 生成
+  - 兼容关系: 若底层或离线流程已得到多段 `players={g_1,...,g_n}`，v1 可只选其中一段 `g_i` 执行 what-if（等价于 `G'={g_i}`）
+- 冲突处理（冻结）:
+  - 当 `shapelet_id` 与 `span` 不一致（例如不覆盖该 shapelet 的 `peak_t`）时，默认继续执行并返回 warning `ERR_SHAPELET_SPAN_MISMATCH`
+  - 当 `shapelet_id` 非法或 `span` 非法（空区间/反向）时，返回错误并拒绝执行
+- 扰动算子（v1）:
+  - `linear_interp`: 按通道独立插值
+  - 端点使用 `x[t_start-1]` 与 `x[t_end+1]`；边界缺失时按单端延拓
+  - 当 `t_start == t_end`（单点）时，按邻点均值或单端值退化处理
 - 交互:
-  - segment 开关 what-if
-  - 选择归因口径（logit/prob）
+  - 单一 segment 开关 what-if（on/off）
+  - baseline 切换（v1 至少支持 `linear_interp`）
+  - 输出口径切换（`prob` 默认，可选 `logit`）
+- 错误码（冻结）:
+  - `ERR_INVALID_SPAN`
+  - `ERR_SHAPELET_NOT_FOUND`
+  - `ERR_SAMPLE_NOT_FOUND`
+  - `ERR_SCOPE_MISMATCH`
+  - `ERR_SHAPELET_SPAN_MISMATCH`（warning，不中断）
 - 验收:
-  - 返回结果包含随机种子、采样次数、baseline 类型
+  - 时延指标（本地单机基线）:
+    - `P95 <= 1.0s`（`T<=2000, P<=64, D<=16`, 单样本 what-if, 命中缓存）
+    - `P99 <= 1.5s`（同上条件）
+  - 同一 `dataset + sample_id + shapelet_id + span + baseline + seed` 结果可复现
 
 ## 3. 算法口径（统一定义）
 
@@ -216,7 +250,7 @@
 - 匹配分数: `I in R^{P x T}`（超界时间步按 padding 或忽略）
 - 峰值位置: `peak_t[p] = argmax_t I[p,t]`，且 `peak_t` 定义为 center-aligned 时间索引（不是窗口起点）
 - `L_p`: 第 `p` 个 shapelet 的长度，用于把 `peak_t[p]` 映射为可视化高亮窗口
-- players: `player_i = (shapelet_id, t_start, t_end, score_summary)`
+- segment（v1）: `segment = (shapelet_id, t_start, t_end)`
 
 ## 3.2 匹配分数 I（建议口径）
 - 当前代码口径:
@@ -234,6 +268,7 @@
 - 兼容说明:
   - 若后续更换底层匹配实现，只要求 `I[p,t]` 满足“值越大表示匹配越强”
 
+<!--
 ## 3.3 从 I 到 players（Part D）
 - 二值化:
   - `B[p,t] = 1{I[p,t] >= Omega}`
@@ -246,6 +281,23 @@
   - `IoU >= merge_iou` 可合并
 - 输出:
   - `players` 和并集时间集合 `T(G')`
+-->
+
+## 3.3 v1 单 segment 选择口径（Part E）
+- 目标:
+  - 在不依赖 Part D 的前提下，为 what-if 提供单一可复现的干预区间
+- 选择对象:
+  - 单个 `shapelet_id`
+  - 单个时间区间 `segment = [t_start, t_end]`
+- 默认推导（当未显式给出 span）:
+  - 由 Part C 的 `peak_t` 与 `L_p` 推导:
+  - `t_start = peak_t - floor(L_p/2)`
+  - `t_end = t_start + L_p - 1`
+  - 边界裁剪到 `[0, T-1]`
+- 约束:
+  - v1 一次 what-if 仅允许一个 segment
+  - 多 segment/multi-shapelet coalition 保留到后续版本
+  - 与 players 口径兼容: 单 segment 模式是多 player 集合干预的单元素特例，不改变底层 `I` 与预测模型定义
 
 ## 3.4 Part B 统计输入口径（冻结）
 - 输出分层约束:
@@ -266,7 +318,7 @@
   - 不在 `omega` 交互时重复模型前向
   - 通过预计算或缓存的 `I`（可含 `max_t I`）在服务端做阈值化和聚合
   - `trigger` 由服务端按请求参数实时计算: `trigger_{n,p}(Omega) = 1{max_t I_{n,p,t} >= Omega}`
-  - `omega` 调整属于解释后处理: 不触发训练、不更新模型权重，仅重算 B/C/D 的统计与可视化派生结果
+  - `omega` 调整属于解释后处理: 不触发训练、不更新模型权重，仅重算 B/C/E 的统计与可视化派生结果
   - 响应中必须回传 `scope`、`omega` 以保证可追溯；`granularity` 在 v1 由接口类型隐式确定
 - 类别覆盖与不平衡修正（冻结）:
   - 记号:
@@ -302,10 +354,10 @@
 
 ## 3.5 扰动函数（SDSL what-if）
 - 价值函数:
-  - `v(S) = f(x_S)`，其中 `S` 为保留的 player 集合
+  - `v(g) = f(x_g)`，其中 `g` 为单一 segment 干预配置
 - 序列构造:
-  - `t in T(S)` 位置保留原值
-  - 其他位置替换为 baseline
+  - 对 `t in [t_start, t_end]` 按规则执行干预（默认替换为 baseline）
+  - 其他位置保留原值
 - baseline 类型:
   - `linear_interp`（默认）
   - `zero`
@@ -313,27 +365,15 @@
 - 输出:
   - `P(original)`, `P(what-if)`, `delta = P(what-if)-P(original)`
 
-## 3.6 Shapley 估计
-- player 集合: `N = {1..n}`
-- 定义:
-  - `phi_i = E_pi[ v(Pre_pi(i) U {i}) - v(Pre_pi(i)) ]`
-- 估计:
-  - 置换采样 `M` 次
-  - 记录每次边际增量，输出均值与标准误 `stderr`
-- 停止条件（建议）:
-  - `M >= min_perm` 且 `max(stderr_i) <= stderr_tol`
-  - 或达到 `max_perm`
-- 可复现:
-  - 固定 `seed`
-  - 返回 `perm_count_actual`
+## 3.6 Shapley（降级为 v1.1+）
+- v1 不作为必做项:
+  - 首版 Part E 仅覆盖单一 shapelet/segment what-if
+  - 不要求在 v1 输出 `phi/stderr`
+- v1.1+ 恢复条件:
+  - 当 Part D players 稳定后，再恢复多 player 的 Shapley 估计
 
-## 3.7 segment 归因回填到时间点
-- `saliency[t]` 由覆盖 `t` 的 `phi_i` 聚合
-- 聚合方式:
-  - `sum_abs`（默认）
-  - `max_abs`
-- 输出可视化:
-  - 时间点热度 + segment 边界
+## 3.7 segment 归因回填到时间点（v1.1+）
+- 依赖 Shapley 输出 `phi_i`，故不纳入 v1 范围
 
 ## 3.8 分类与 margin 口径
 - `pred_class = argmax_c probs[c]`
@@ -375,9 +415,9 @@
 ## 5. 后端模块划分（建议）
 - `loader`: 数据与 checkpoint 读取
 - `matcher`: 计算 `I/peak_t`
-- `player_builder`: 阈值化与 segments 管理
-- `perturb`: 构造 `x_S` 与 `v(S)`
-- `shapley`: 置换采样与统计
+- `segment_selector`: 维护单一 `shapelet_id + span`（可由 Part C 推导）
+- `perturb`: 构造 `x_g` 与 `v(g)`（单 segment what-if）
+- `shapley`: v1.1+（暂缓）
 - `service`: API 编排与缓存
 - `session_store`: 分析会话存储
 
@@ -387,14 +427,13 @@
   - `currentShapelets`
   - `currentMatchScore = I`
   - `omega`
-  - `players`
-  - `coalition`
-  - `explainResult`
+  - `currentSegment`
+  - `whatifResult`
 - 联动规则:
-  - Part A 选样本 -> 刷新 C/D/E
+  - Part A 选样本 -> 刷新 C/E
   - Part B 进入 C 必须携带 `dataset + sample_id + shapelet_id + scope + omega`，C 自动 pin 对应 shapelet 并定位到 `peak_t`
   - Part E 回跳 C 时必须携带 `sample_id` 与目标 `segment/span`（可附 `shapelet_id`），用于匹配复核
-  - Part D 改 `omega` -> players 重算并清空旧 shapley
+  - Part E 切换 `omega` 或 `span` -> 重新执行单 segment what-if
 
 ## 7. 性能与工程约束
 - 最大输入建议: `T<=4000`, `P<=128`, `D<=16`
@@ -406,11 +445,10 @@
 ## 8. 测试计划（必须）
 - 单元测试:
   - `I` 计算正确性
-  - segments 提取边界
   - baseline 构造正确性
-  - shapley 可复现性（seed 固定）
+  - 单 segment what-if 可复现性（seed 固定）
 - 集成测试:
-  - A->C->D->E 全链路
+  - A->C->E 全链路
   - session 保存后可回放一致
 - 回归测试:
   - 不同数据集配置切换
@@ -418,18 +456,18 @@
 
 ## 9. 关键决策记录（v1）
 - R1: `I` 在 v1 中定义为底层 shapelet matcher 直接输出的模型原生匹配分数；默认实现采用 `use_shapelet_layer=True` 和 `dist_measure='cosine'`；统一语义为“值越大表示匹配越强”
-  - 后续改进空间: 可增加 `-L2`、cross-correlation 等替代口径，并提供跨口径对照实验，评估其对热力图、players 和归因结果稳定性的影响
+  - 后续改进空间: 可增加 `-L2`、cross-correlation 等替代口径，并提供跨口径对照实验，评估其对热力图、segment 选择与归因结果稳定性的影响
 - R2: `shapelet_temperature (tau)` 在 v1 中全数据集统一为固定值；`Omega` 按数据集配置，初始值依据该数据集的 `I` 分布直方图确定
 - R3: baseline 在 v1 中统一为 `linear_interp`
   - 后续改进空间: 可增加 `zero`、`dataset_mean`、局部样本库插值、类条件 baseline，并比较不同 baseline 对 what-if / Shapley 稳定性的影响
-- R4: Shapley 输出口径在 v1 中以前端展示友好的 `prob` 为主，后端保留 `logit` 作为可选参数
-  - 后续改进空间: 可增加 `prob` 与 `logit` 双输出对照视图，并评估不同口径下归因排序的一致性
+- R4: v1 的 Part E 仅交付单一 shapelet/segment what-if；Shapley 估计下沉到 v1.1+
+  - 后续改进空间: 恢复 `prob/logit` 双口径 Shapley，对比不同口径下归因排序一致性
 - R5: Part B 的类别不平衡修正在 v1 中采用 `lift`（`alpha=1.0` 的 Laplace 平滑，`min_support=20`）
   - 后续改进空间: 可补充 `PMI`、加权 lift、置信区间或显著性检验，用于减少小样本类别的统计波动
-- R6: 在线训练完全移出首版；v1 只支持加载已有 checkpoint 做推理、匹配、players 构建与解释计算
+- R6: 在线训练完全移出首版；v1 只支持加载已有 checkpoint 做推理、匹配与单 segment what-if 解释计算
   - 后续改进空间: 可在后续版本增加异步训练任务、训练进度查询、训练结果版本管理与训练后自动刷新可视分析结果
 - R7: 阈值统一策略
-  - v1: 统一全局 `omega`，用于 Part B 统计、Part C 证据高亮、Part D players 生成
+  - v1: 统一全局 `omega`，用于 Part B 统计、Part C 证据高亮、Part E what-if
   - v1: 历史固定阈值常量路径（`0.5/0.4`）不再作为业务口径，仅保留迁移期兼容说明
 - R8: `granularity` 参数化策略
   - v1: `granularity` 仅作为概念口径，不作为 Part B API 的请求参数或回显字段
@@ -444,24 +482,17 @@ matching:
   similarity_type: cosine
   normalize: znorm
   shapelet_temperature: 1.0
-players:
+explain:
   omega: 0.02
-  min_len: 5
-  fill_gap_len: 2
-  merge_iou: 0.6
 whatif:
   baseline: linear_interp
   value_type: prob
-shapley:
-  min_perm: 64
-  max_perm: 512
-  stderr_tol: 0.01
   seed: 2026
 margin_threshold: 0.1
 ```
 
 ## 11. 里程碑（建议）
-- M1（1 周）: 离线计算链路跑通（`I -> players -> what-if -> shapley`）
+- M1（1 周）: 离线计算链路跑通（`I -> single-segment what-if`）
 - M2（1 周）: API v1 落地与缓存
 - M3（1-2 周）: 前端联动与会话回放
 - M4（1 周）: 测试补齐与性能调优
