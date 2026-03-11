@@ -8,7 +8,7 @@ from backend.api.part_b import router as part_b_router
 from backend.api.part_c import router as part_c_router
 from backend.api.part_e import router as part_e_router
 from backend.core.constants import SPEC_VERSION
-
+from fastapi.middleware.cors import CORSMiddleware
 
 def create_app() -> FastAPI:
     app = FastAPI(title="ShapeX API", version=SPEC_VERSION)
@@ -16,7 +16,13 @@ def create_app() -> FastAPI:
     app.include_router(part_b_router)
     app.include_router(part_c_router)
     app.include_router(part_e_router)
-
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     @app.get("/", include_in_schema=False)
     def debug_home() -> FileResponse:
         return FileResponse(Path(__file__).with_name("part_a_debug.html"))
