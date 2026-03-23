@@ -142,3 +142,43 @@ class SampleDetailResponse(BaseModel):
     sequence: list[list[float]]
     suggested_window_len: int
     warnings: list[ApiWarning] = Field(default_factory=list)
+
+class DepthSample(BaseModel):
+    sample_id: str
+    label: int | None
+    prediction: PredictionSummary
+    depth: float
+    sequence: list[list[float]]
+
+
+class DepthSummary(BaseModel):
+    min_depth: float
+    max_depth: float
+    median_depth: float
+    max_depth_sample_id: str | None
+
+
+class DepthCentralRegion(BaseModel):
+    lower_bound: list[float]
+    upper_bound: list[float]
+    threshold_depth: float
+    central_ratio: float
+    central_count: int
+    band_mode: str
+
+
+class DepthProfileResponse(BaseModel):
+    spec_version: str = SPEC_VERSION
+    dataset: str
+    split: str
+    pred_class: int
+    total: int
+    items: list[DepthSample]
+    plot_items: list[DepthSample]
+    plot_sample_rate: float
+    representative_sample_id: str | None
+    representative_sequence: list[float]
+    mean_sequence: list[float]
+    central_region: DepthCentralRegion
+    depth_summary: DepthSummary
+    warnings: list[ApiWarning] = Field(default_factory=list)

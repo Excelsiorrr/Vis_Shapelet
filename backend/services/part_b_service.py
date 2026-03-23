@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -10,7 +11,7 @@ import numpy as np
 import torch
 from fastapi import HTTPException
 
-from backend.core.constants import DEFAULT_MARGIN_THRESHOLD, FREQSHAPE_DATASETS, SUPPORTED_DATASETS
+from backend.core.constants import DEFAULT_EXPLAIN_OMEGA, FREQSHAPE_DATASETS, SUPPORTED_DATASETS
 from backend.schemas.part_a import ApiWarning
 from backend.schemas.part_b import (
     HistogramDefault,
@@ -22,12 +23,15 @@ from backend.schemas.part_b import (
     ShapeletHistogramResponse,
     ShapeletLibraryMetaResponse,
     ShapeletStatsSummaryResponse,
+    ShapeletTopHitsResponse,
     SupportSummary,
+    TopHitSampleItem,
 )
 from backend.services.part_a_service import PartAService
 
 _SCOPE_VALUES = {"test", "train", "all"}
 _HIST_MODE_VALUES = {"per_shapelet", "global"}
+_RANK_METRIC_VALUES = {"max_i", "trigger_score"}
 _SHAPELET_ID_RE = re.compile(r"\d+")
 
 
@@ -38,6 +42,16 @@ class ActivationBundle:
     activations: np.ndarray  # [N, T, P]
     labels: np.ndarray  # [N]
     max_scores: np.ndarray  # [N, P]
+    warnings: list[ApiWarning]
+
+
+@dataclass
+class PredictionBundle:
+    """Container for cached scoped class predictions reused by top-hits responses."""
+
+    labels: np.ndarray  # [N]
+    preds: np.ndarray  # [N]
+    probs: np.ndarray  # [N, C]
     warnings: list[ApiWarning]
 
 
@@ -78,6 +92,19 @@ def _safe_div(numerator: float, denominator: float) -> float:
     return float(numerator / denominator)
 
 
+def _softmax_logits(logits: np.ndarray) -> np.ndarray:
+    shifted = logits - logits.max(axis=-1, keepdims=True)
+    exp = np.exp(shifted)
+    return exp / exp.sum(axis=-1, keepdims=True)
+
+
+def _margin_from_probs(probs: np.ndarray) -> float:
+    if probs.size <= 1:
+        return 1.0
+    top2 = np.sort(probs)[-2:]
+    return float(top2[-1] - top2[-2])
+
+
 def _lift_value(
     n_pc: int,
     n_p_trig: int,
@@ -101,7 +128,7 @@ class PartBService:
         self.part_a_service = PartAService(self.project_root)
         self.inference_device = self.part_a_service.inference_device
         self.scope_default = "test"
-        self.omega_default = float(DEFAULT_MARGIN_THRESHOLD)
+        self.omega_default = float(DEFAULT_EXPLAIN_OMEGA)
         self.hist_bins_default = 50
         self.hist_density_default = True
         self.min_support = 20
@@ -122,6 +149,17 @@ class PartBService:
         if normalized not in _HIST_MODE_VALUES:
             raise HTTPException(status_code=400, detail=f"hist_mode must be one of: {sorted(_HIST_MODE_VALUES)}")
         return normalized
+
+    def _validate_rank_metric(self, rank_metric: str) -> str:
+        normalized = rank_metric.lower().strip()
+        if normalized not in _RANK_METRIC_VALUES:
+            raise HTTPException(status_code=400, detail=f"rank_metric must be one of: {sorted(_RANK_METRIC_VALUES)}")
+        return normalized
+
+    def _validate_omega(self, omega: float) -> float:
+        if not math.isfinite(omega):
+            raise HTTPException(status_code=400, detail="omega must be a finite float")
+        return float(omega)
 
     def _parse_shapelet_index(self, shapelet_id: str, num_shapelets: int) -> int:
         """Extract trailing numeric index from shapelet_id and bounds-check it."""
@@ -227,6 +265,19 @@ class PartBService:
         max_scores = acts.max(axis=1)
         labels = y.detach().cpu().numpy().astype(int)
         return ActivationBundle(activations=acts, labels=labels, max_scores=max_scores, warnings=warnings)
+
+    @lru_cache(maxsize=len(SUPPORTED_DATASETS) * 3)
+    def _cached_predictions(self, dataset_name: str, scope: str) -> PredictionBundle:
+        """Compute and cache class predictions for the scoped samples used in top-hits."""
+
+        normalized_scope = self._validate_scope(scope)
+        x, y, warnings = self._scope_sequences_and_labels(dataset_name, normalized_scope)
+        bundle = self.part_a_service.load_dataset_bundle(dataset_name)
+        logits = self.part_a_service._predict_batch(bundle.class_model, x)
+        probs = _softmax_logits(logits)
+        preds = probs.argmax(axis=1)
+        labels = y.detach().cpu().numpy().astype(int)
+        return PredictionBundle(labels=labels, preds=preds, probs=probs, warnings=warnings)
 
     @lru_cache(maxsize=len(SUPPORTED_DATASETS))
     def _cached_gallery_items(self, dataset_name: str) -> list[ShapeletGalleryItem]:
@@ -362,12 +413,13 @@ class PartBService:
 
         bundle = self.part_a_service.load_dataset_bundle(dataset_name)
         normalized_scope = self._validate_scope(scope)
-        values, warnings = self._summary_values(dataset_name, shapelet_id, normalized_scope, omega)
+        normalized_omega = self._validate_omega(omega)
+        values, warnings = self._summary_values(dataset_name, shapelet_id, normalized_scope, normalized_omega)
         return ShapeletStatsSummaryResponse(
             dataset=bundle.dataset_name,
             shapelet_id=shapelet_id,
             scope=normalized_scope,
-            omega=omega,
+            omega=normalized_omega,
             global_trigger_rate=values["global_trigger_rate"],
             class_trigger_rate=values["class_trigger_rate"],
             class_coverage=values["class_coverage"],
@@ -430,7 +482,8 @@ class PartBService:
 
         bundle = self.part_a_service.load_dataset_bundle(dataset_name)
         normalized_scope = self._validate_scope(scope)
-        values, warnings = self._summary_values(dataset_name, shapelet_id, normalized_scope, omega)
+        normalized_omega = self._validate_omega(omega)
+        values, warnings = self._summary_values(dataset_name, shapelet_id, normalized_scope, normalized_omega)
 
         class_items: list[ShapeletClassStatsItem] = []
         for class_id in values["class_ids"]:
@@ -449,7 +502,60 @@ class PartBService:
             dataset=bundle.dataset_name,
             shapelet_id=shapelet_id,
             scope=normalized_scope,
-            omega=omega,
+            omega=normalized_omega,
             items=class_items,
+            warnings=warnings,
+        )
+
+    def get_top_hits(
+        self,
+        dataset_name: str,
+        shapelet_id: str,
+        scope: str,
+        omega: float,
+        offset: int,
+        limit: int,
+        rank_metric: str,
+    ) -> ShapeletTopHitsResponse:
+        """Return triggered samples ranked by per-sample max activation for B->C linking."""
+
+        bundle = self.part_a_service.load_dataset_bundle(dataset_name)
+        normalized_scope = self._validate_scope(scope)
+        normalized_omega = self._validate_omega(omega)
+        normalized_rank_metric = self._validate_rank_metric(rank_metric)
+
+        activations = self._cached_activations(dataset_name, normalized_scope)
+        predictions = self._cached_predictions(dataset_name, normalized_scope)
+        warnings = list(activations.warnings)
+
+        p_idx = self._parse_shapelet_index(shapelet_id, activations.max_scores.shape[1])
+        trigger_scores = activations.max_scores[:, p_idx]
+        triggered_indices = [idx for idx, score in enumerate(trigger_scores.tolist()) if float(score) >= normalized_omega]
+        ranked_indices = sorted(triggered_indices, key=lambda idx: (-float(trigger_scores[idx]), int(idx)))
+
+        items: list[TopHitSampleItem] = []
+        for rank, sample_idx in enumerate(ranked_indices[offset : offset + limit], start=offset + 1):
+            probs = predictions.probs[sample_idx]
+            items.append(
+                TopHitSampleItem(
+                    sample_id=str(sample_idx),
+                    trigger_score=float(trigger_scores[sample_idx]),
+                    rank=rank,
+                    label=int(predictions.labels[sample_idx]) if sample_idx < len(predictions.labels) else None,
+                    pred_class=int(predictions.preds[sample_idx]) if sample_idx < len(predictions.preds) else None,
+                    margin=_margin_from_probs(probs) if sample_idx < len(predictions.probs) else None,
+                )
+            )
+
+        return ShapeletTopHitsResponse(
+            dataset=bundle.dataset_name,
+            shapelet_id=shapelet_id,
+            scope=normalized_scope,
+            omega=normalized_omega,
+            total=len(ranked_indices),
+            offset=offset,
+            limit=limit,
+            rank_metric=normalized_rank_metric,
+            items=items,
             warnings=warnings,
         )

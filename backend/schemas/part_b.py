@@ -98,3 +98,26 @@ class ShapeletClassStatsResponse(BaseModel):
     omega: float
     items: list[ShapeletClassStatsItem]
     warnings: list[ApiWarning] = Field(default_factory=list)
+
+
+class TopHitSampleItem(BaseModel):
+    sample_id: str
+    trigger_score: float
+    rank: int
+    label: int | None
+    pred_class: int | None
+    margin: float | None
+
+
+class ShapeletTopHitsResponse(BaseModel):
+    spec_version: str = SPEC_VERSION
+    dataset: str
+    shapelet_id: str
+    scope: str
+    omega: float
+    total: int
+    offset: int
+    limit: int
+    rank_metric: str
+    items: list[TopHitSampleItem]
+    warnings: list[ApiWarning] = Field(default_factory=list)

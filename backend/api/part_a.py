@@ -8,6 +8,7 @@ from backend.schemas.part_a import (
     ClustersResponse,
     DatasetListItem,
     DatasetListResponse,
+    DepthProfileResponse,
     LowMarginSamplesResponse,
     MetaResponse,
     MetricsResponse,
@@ -78,6 +79,15 @@ def get_class_samples(
     return service.list_class_samples(dataset_name, label, offset, limit)
 
 
+
+@router.get("/datasets/{dataset_name}/samples/depth-profile", response_model=DepthProfileResponse)
+def get_depth_profile_by_pred_class(
+    dataset_name: str,
+    pred_class: int = Query(..., ge=0),
+    split: str = Query(default="test"),
+) -> DepthProfileResponse:
+    return service.get_depth_profile_by_pred_class(dataset_name, split, pred_class)
+
 @router.get("/datasets/{dataset_name}/samples/{sample_id}", response_model=SampleDetailResponse)
 def get_sample_detail(
     dataset_name: str,
@@ -85,3 +95,4 @@ def get_sample_detail(
     split: str = Query(default="test"),
 ) -> SampleDetailResponse:
     return service.get_sample_detail(dataset_name, split, sample_id)
+

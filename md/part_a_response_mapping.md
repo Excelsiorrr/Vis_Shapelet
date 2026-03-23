@@ -15,6 +15,7 @@
 | `GET /api/v1/part-a/datasets/{dataset_name}/clusters?cluster_k=...` | `ClustersResponse` | `ClusterProfile[]` `ApiWarning[]` | 训练集聚类统计 |
 | `GET /api/v1/part-a/datasets/{dataset_name}/samples/low-margin?threshold=...&offset=...&limit=...` | `LowMarginSamplesResponse` | `LowMarginSampleSummary[]` `ApiWarning[]` | 低 margin 样本分页 |
 | `GET /api/v1/part-a/datasets/{dataset_name}/samples?label=...&offset=...&limit=...` | `ClassSamplesResponse` | `TestSampleSummary[]` `PredictionSummary` `ApiWarning[]` | 按类别分页的测试样本列表 |
+| `GET /api/v1/part-a/datasets/{dataset_name}/samples/depth-profile?pred_class=...&split=test` | `DepthProfileResponse` | `DepthSample[]` `DepthCentralRegion` `DepthSummary` `ApiWarning[]` | 按预测类别的深度画像（Panel-3 风格中心带） |
 | `GET /api/v1/part-a/datasets/{dataset_name}/samples/{sample_id}?split=test` | `SampleDetailResponse` | `PredictionSummary` `ApiWarning[]` | 单样本完整详情 |
 
 ## 2. 类型说明
@@ -185,6 +186,41 @@
   - `sequence`
   - `suggested_window_len`
   - `warnings: ApiWarning[]`
+
+### 2.8 按预测类别深度画像
+
+#### `DepthProfileResponse`
+- 对应接口:
+  - `GET /api/v1/part-a/datasets/{dataset_name}/samples/depth-profile?pred_class=...&split=test`
+- 结构:
+  - `spec_version`
+  - `dataset`
+  - `split`
+  - `pred_class`
+  - `total`
+  - `items: DepthSample[]`（按 depth 从高到低）
+  - `plot_items: DepthSample[]`（绘图采样子集）
+  - `plot_sample_rate`
+  - `representative_sample_id`
+  - `representative_sequence`
+  - `mean_sequence`
+  - `central_region: DepthCentralRegion`
+  - `depth_summary: DepthSummary`
+  - `warnings: ApiWarning[]`
+
+#### `DepthCentralRegion`
+- 典型字段:
+  - `lower_bound`
+  - `upper_bound`
+  - `threshold_depth`
+  - `central_ratio`
+  - `central_count`
+  - `band_mode`
+
+- 说明:
+  - 当前口径对齐 `toy/fig.py` 第三图思路:
+  - 先按 depth 取 top `central_ratio` 样本集合，再用 `band_mode` 计算中心带。
+  - 默认 `band_mode=quantile`，即上下界分别取 Q25 / Q75。
 
 ## 3. 两个容易混淆的点
 

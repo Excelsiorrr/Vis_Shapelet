@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from fastapi import HTTPException
 
-from backend.core.constants import DEFAULT_MARGIN_THRESHOLD, SUPPORTED_DATASETS
+from backend.core.constants import DEFAULT_EXPLAIN_OMEGA, SUPPORTED_DATASETS
 from backend.schemas.part_a import ApiWarning, PredictionSummary
 from backend.schemas.part_c import (
     HighlightWindow,
@@ -54,7 +54,7 @@ class PartCService:
         self.part_a_service = PartAService(self.project_root)
         self.inference_device = self.part_a_service.inference_device
         self.scope_default = "test"
-        self.omega_default = float(DEFAULT_MARGIN_THRESHOLD)
+        self.omega_default = float(DEFAULT_EXPLAIN_OMEGA)
 
     def _build_navigation_match_request(
         self,

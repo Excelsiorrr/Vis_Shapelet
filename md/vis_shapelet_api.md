@@ -140,6 +140,39 @@
     "sequence": "float[T][D]",
     "suggested_window_len": "int",
     "warnings": "ApiWarning[]"
+  },
+  "DepthSample": {
+    "sample_id": "string",
+    "label": "int|null",
+    "prediction": "PredictionSummary",
+    "depth": "float",
+    "sequence": "float[T][1] (z-normalized)"
+  },
+  "DepthSummary": {
+    "min_depth": "float",
+    "max_depth": "float",
+    "median_depth": "float",
+    "max_depth_sample_id": "string|null"
+  },
+  "DepthCentralRegion": {
+    "lower_bound": "float[T]",
+    "upper_bound": "float[T]",
+    "threshold_depth": "float"
+  },
+  "DepthProfileResponse": {
+    "spec_version": "string",
+    "dataset": "string",
+    "split": "test",
+    "pred_class": "int",
+    "total": "int",
+    "items": "DepthSample[]",
+    "plot_items": "DepthSample[] (uniform sampled, default 10%)",
+    "plot_sample_rate": "float",
+    "representative_sample_id": "string|null",
+    "representative_sequence": "float[T]",
+    "central_region": "DepthCentralRegion",
+    "depth_summary": "DepthSummary",
+    "warnings": "ApiWarning[]"
   }
 }
 ```
@@ -309,6 +342,25 @@
   - `sequence`: 原始序列，形状为 `T x D`。
   - `suggested_window_len`: 推荐的初始窗口长度，当前后端约定等于 `shapelet_len`。
   - `warnings`: 与当前数据集相关的告警信息。
+
+##### DepthProfileResponse
+- 这是什么:
+  - 按预测类别（`pred_class`）返回测试集 Soft Depth 可视化所需的完整数据。
+- 前端通常怎么用:
+  - 用 `plot_items` 绘制淡灰背景曲线（默认均匀采样 10%）。
+  - 用 `items` 的头部高深度样本叠加中心样本曲线（top `central_ratio`）。
+  - 用 `mean_sequence` 绘制均值曲线。
+  - 用 `central_region.lower_bound/upper_bound` 绘制中心带。
+- 字段说明:
+  - `items`: 全量样本（已 z-normalized），用于列表和精确交互。
+  - `plot_items`: 用于绘图的均匀采样子集（默认 10%），用于控制渲染开销。
+  - `plot_sample_rate`: 当前 `plot_items` 的采样比例。
+  - `representative_sample_id`: 深度最大的样本 id（与 `representative_sequence` 对应）。
+  - `mean_sequence`: 当前预测类别下所有样本的均值曲线（z-normalized）。
+  - `central_region.central_ratio`: 中心样本比例（默认 0.5）。
+  - `central_region.central_count`: 实际选中的中心样本数量。
+  - `central_region.band_mode`: 中心带计算模式（当前默认 `quantile`）。
+  - `depth_summary`: 提供最小/最大/中位深度，便于前端做颜色归一化与图例。
 
 ```json
 {
@@ -510,6 +562,19 @@
   - `sample_id` 通常来自低 margin 列表或按类分页列表。
   - `sequence` 可直接用来画折线图或热图。
   - `suggested_window_len` 可作为前端初始时间窗或刷选长度默认值。
+
+#### 7) 获取按预测类别聚合的 Soft Depth 画像（测试集）
+- `GET /api/v1/part-a/datasets/{dataset_name}/samples/depth-profile?pred_class=1&split=test`
+- 返回:
+  - 该预测类别下的测试样本全量列表 `items`（含 `sequence + depth`，已 z-normalized）
+  - 用于绘图的采样子集 `plot_items`（默认 10%，均匀采样）
+  - 均值曲线 `mean_sequence`
+  - 中心样本集合（top `central_ratio`）对应的中心带 `central_region.lower_bound/upper_bound`
+  - 深度统计 `depth_summary`
+- 前端理解:
+  - 用于 Samples 面板的“类别深度图”一次性绘制。
+  - 该接口已经内置 soft-depth 计算，前端只负责展示。
+  - 当前仅支持 `split=test`；其他 split 会返回 400。
 
 ### Part C 端点（草案，遵循 `/api/v1/part-*` 体系）
 

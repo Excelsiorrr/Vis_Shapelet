@@ -18,6 +18,10 @@ from backend.schemas.part_a import (
     ClusterProfile,
     ClustersResponse,
     DatasetMeta,
+    DepthCentralRegion,
+    DepthProfileResponse,
+    DepthSample,
+    DepthSummary,
     LowMarginSample,
     LowMarginSampleSummary,
     LowMarginSamplesResponse,
@@ -109,6 +113,43 @@ def _margin_from_probs(probs: np.ndarray) -> float:
         return 1.0
     top2 = np.sort(probs)[-2:]
     return float(top2[-1] - top2[-2])
+
+def _compute_soft_depth_against_mean(x: np.ndarray, eps: float = 1e-8) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute soft depth against mean curve, aligned with toy/fig.py."""
+    if x.ndim != 2:
+        raise ValueError(f"Expected [N,T], got shape {x.shape}")
+    n = x.shape[0]
+    if n == 0:
+        empty = np.array([], dtype=float)
+        return empty, empty, empty, np.empty((0, x.shape[1]), dtype=float)
+
+    mean_curve = np.mean(x, axis=0)
+    sigma_t = np.std(x, axis=0)
+    sigma_t = np.maximum(sigma_t, eps)
+
+    w = np.exp(-((x - mean_curve[None, :]) ** 2) / (2.0 * (sigma_t[None, :] ** 2)))
+    depth = np.mean(w, axis=1)
+    return depth, mean_curve, sigma_t, w
+
+
+
+def _z_normalize_rows(x: np.ndarray) -> np.ndarray:
+    """Z-normalize each sample along time axis; input [N,T]."""
+    if x.ndim != 2:
+        raise ValueError(f"Expected [N,T], got shape {x.shape}")
+    means = np.mean(x, axis=1, keepdims=True)
+    stds = np.std(x, axis=1, keepdims=True)
+    stds = np.where(stds < 1e-6, 1.0, stds)
+    return (x - means) / stds
+
+
+def _uniform_sample_indices(total: int, rate: float) -> np.ndarray:
+    if total <= 0:
+        return np.array([], dtype=int)
+    count = max(1, int(np.ceil(total * rate)))
+    if count >= total:
+        return np.arange(total, dtype=int)
+    return np.linspace(0, total - 1, num=count, dtype=int)
 
 
 def _infer_num_classes_from_checkpoint(checkpoint_path: Path) -> int:
@@ -247,11 +288,13 @@ class PartAService:
         if not explainer_ckpt.exists():
             raise HTTPException(status_code=500, detail=f"Missing explainer checkpoint: {explainer_ckpt}")
         shapelet_num, shapelet_len = _extract_shapelet_meta(explainer_ckpt)
+        # Keep meta seq_len consistent with sample-detail sequence length.
+        actual_seq_len = int(self._dataset_sequences(test_dataset).shape[1])
 
         dataset_meta = DatasetMeta(
             dataset=dataset_name,
             sampling_rate=_resolve_sampling_rate(pipeline.args),
-            seq_len=int(getattr(pipeline.args, "seq_len", train_dataset.X.shape[1])),
+            seq_len=actual_seq_len,
         )
         training_meta = TrainingMeta(
             shapelet_num=shapelet_num,
@@ -501,6 +544,133 @@ class PartAService:
             warnings=bundle.warnings,
         )
 
+    @lru_cache(maxsize=len(SUPPORTED_DATASETS) * 16)
+    def get_depth_profile_by_pred_class(
+        self,
+        dataset_name: str,
+        split: str,
+        pred_class: int,
+    ) -> DepthProfileResponse:
+        bundle = self.load_dataset_bundle(dataset_name)
+        split_name = split.upper()
+        if split_name != "TEST":
+            raise HTTPException(status_code=400, detail="depth-profile currently supports split=test only")
+
+        sequences = self._dataset_sequences(bundle.test_dataset)
+        labels = self._dataset_labels(bundle.test_dataset).detach().cpu().numpy().astype(int)
+        cached = self._cached_test_predictions(dataset_name)
+
+        indices = np.where(cached.preds == int(pred_class))[0]
+        if indices.size == 0:
+            warnings = [
+                *bundle.warnings,
+                ApiWarning(
+                    code="EMPTY_PRED_CLASS_GROUP",
+                    message=f"No test samples are currently predicted as class {pred_class}.",
+                ),
+            ]
+            return DepthProfileResponse(
+                dataset=bundle.dataset_name,
+                split=split_name.lower(),
+                pred_class=int(pred_class),
+                total=0,
+                items=[],
+                plot_items=[],
+                plot_sample_rate=0.0,
+                representative_sample_id=None,
+                representative_sequence=[],
+                mean_sequence=[],
+                central_region=DepthCentralRegion(
+                    lower_bound=[],
+                    upper_bound=[],
+                    threshold_depth=0.0,
+                    central_ratio=0.5,
+                    central_count=0,
+                    band_mode="quantile",
+                ),
+                depth_summary=DepthSummary(min_depth=0.0, max_depth=0.0, median_depth=0.0, max_depth_sample_id=None),
+                warnings=warnings,
+            )
+
+        idx_list = indices.tolist()
+        seq_raw = np.stack([_to_numpy_2d(sequences[i])[:, 0] for i in idx_list], axis=0)
+        seq_norm = _z_normalize_rows(seq_raw)
+        depths, mean_curve, _sigma_t, _w = _compute_soft_depth_against_mean(seq_norm)
+
+        sort_order = np.argsort(-depths)
+        sorted_indices = [idx_list[i] for i in sort_order.tolist()]
+        sorted_depths = depths[sort_order]
+        sorted_seq_norm = seq_norm[sort_order]
+
+        # Align with toy/fig.py panel-3 semantics:
+        # choose top central_ratio samples by depth, then use quantile band.
+        central_ratio = 0.5
+        band_mode = "quantile"
+        central_count = max(1, int(np.ceil(len(sorted_indices) * central_ratio)))
+        central_x = sorted_seq_norm[:central_count]
+        threshold_depth = float(sorted_depths[central_count - 1])
+        if band_mode == "quantile":
+            lower_bound = np.quantile(central_x, 0.25, axis=0).astype(float).tolist()
+            upper_bound = np.quantile(central_x, 0.75, axis=0).astype(float).tolist()
+        else:
+            lower_bound = np.min(central_x, axis=0).astype(float).tolist()
+            upper_bound = np.max(central_x, axis=0).astype(float).tolist()
+
+        representative_idx = int(sorted_indices[0])
+        representative_sequence = sorted_seq_norm[0].astype(float).tolist()
+        mean_sequence = mean_curve.astype(float).tolist()
+
+        items: list[DepthSample] = []
+        for rank, sample_idx in enumerate(sorted_indices):
+            prob = cached.probs[sample_idx]
+            norm_seq_2d = [[float(v)] for v in sorted_seq_norm[rank].tolist()]
+            items.append(
+                DepthSample(
+                    sample_id=str(sample_idx),
+                    label=int(labels[sample_idx]),
+                    prediction=PredictionSummary(
+                        pred_class=int(cached.preds[sample_idx]),
+                        probs=[float(v) for v in prob.tolist()],
+                        margin=_margin_from_probs(prob),
+                    ),
+                    depth=float(sorted_depths[rank]),
+                    sequence=norm_seq_2d,
+                )
+            )
+
+        sample_rate = 0.1
+        sample_pos = _uniform_sample_indices(len(items), sample_rate)
+        plot_items = [items[int(i)] for i in sample_pos.tolist()]
+        plot_sample_rate = float(len(plot_items) / len(items)) if items else 0.0
+
+        return DepthProfileResponse(
+            dataset=bundle.dataset_name,
+            split=split_name.lower(),
+            pred_class=int(pred_class),
+            total=len(items),
+            items=items,
+            plot_items=plot_items,
+            plot_sample_rate=plot_sample_rate,
+            representative_sample_id=str(representative_idx),
+            representative_sequence=representative_sequence,
+            mean_sequence=mean_sequence,
+            central_region=DepthCentralRegion(
+                lower_bound=lower_bound,
+                upper_bound=upper_bound,
+                threshold_depth=threshold_depth,
+                central_ratio=central_ratio,
+                central_count=central_count,
+                band_mode=band_mode,
+            ),
+            depth_summary=DepthSummary(
+                min_depth=float(np.min(depths)),
+                max_depth=float(np.max(depths)),
+                median_depth=threshold_depth,
+                max_depth_sample_id=str(representative_idx),
+            ),
+            warnings=bundle.warnings,
+        )
+
     def get_sample_detail(self, dataset_name: str, split: str, sample_id: int) -> SampleDetailResponse:
         bundle = self.load_dataset_bundle(dataset_name)
         split_name = split.upper()
@@ -527,3 +697,8 @@ class PartAService:
             suggested_window_len=bundle.training_meta.shapelet_len,
             warnings=bundle.warnings,
         )
+
+
+
+
+

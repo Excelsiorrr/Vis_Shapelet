@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from backend.services.part_b_service import PartBService
+from backend.core.constants import DEFAULT_EXPLAIN_OMEGA
 from backend.schemas.part_b import (
     ShapeletClassStatsResponse,
     ShapeletDetailResponse,
@@ -10,7 +10,9 @@ from backend.schemas.part_b import (
     ShapeletHistogramResponse,
     ShapeletLibraryMetaResponse,
     ShapeletStatsSummaryResponse,
+    ShapeletTopHitsResponse,
 )
+from backend.services.part_b_service import PartBService
 
 
 service = PartBService()
@@ -41,7 +43,7 @@ def get_shapelet_stats_summary(
     dataset_name: str,
     shapelet_id: str,
     scope: str = Query(default="test"),
-    omega: float = Query(default=0.1),
+    omega: float = Query(default=DEFAULT_EXPLAIN_OMEGA),
 ) -> ShapeletStatsSummaryResponse:
     return service.get_stats_summary(dataset_name, shapelet_id, scope, omega)
 
@@ -65,6 +67,19 @@ def get_shapelet_class_stats(
     dataset_name: str,
     shapelet_id: str,
     scope: str = Query(default="test"),
-    omega: float = Query(default=0.1),
+    omega: float = Query(default=DEFAULT_EXPLAIN_OMEGA),
 ) -> ShapeletClassStatsResponse:
     return service.get_class_stats(dataset_name, shapelet_id, scope, omega)
+
+
+@router.get("/datasets/{dataset_name}/shapelets/{shapelet_id}/samples/top-hits", response_model=ShapeletTopHitsResponse)
+def get_shapelet_top_hits(
+    dataset_name: str,
+    shapelet_id: str,
+    scope: str = Query(default="test"),
+    omega: float = Query(default=DEFAULT_EXPLAIN_OMEGA),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=200),
+    rank_metric: str = Query(default="max_i"),
+) -> ShapeletTopHitsResponse:
+    return service.get_top_hits(dataset_name, shapelet_id, scope, omega, offset, limit, rank_metric)

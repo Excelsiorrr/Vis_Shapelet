@@ -3,7 +3,7 @@ from omegaconf import OmegaConf
 
 from exp_saliency_general import ShapeXPipline#这是核心类（训练、测试、解释性分析都在里面）
 from txai.synth_data.synth_data_base import SynthTrainDataset
-import vis_ecg
+import vis.vis_ecg as vis_ecg
 
 
 #读取配置，然后根据配置去调度核心流水线 (ShapeXPipline) 来执行 训练 (Train) 或 测试/解释性分析 (Test/Saliency)。
