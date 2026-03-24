@@ -95,12 +95,44 @@ class ShapeletMatrixSummaryResponse(BaseModel):
     sort_mode: str
     time_edges: list[int]
     row_sizes: list[int]
+    representative_sample_ids: list[str]
+    representative_curves: list[list[float]]
     matrix: list[list[float]]
     summary_median: list[float]
     summary_q25: list[float]
     summary_q75: list[float]
     exceed_ratio: list[float]
     value_range: list[float]
+    warnings: list[ApiWarning] = Field(default_factory=list)
+
+
+class ShapeletMatrixCellMember(BaseModel):
+    sample_id: str
+    label: int | None
+    pred_class: int | None
+    margin: float | None
+    activation_curve: list[float]
+    sequence_curve: list[float]
+    activation_peak: float
+
+
+class ShapeletMatrixCellDetailResponse(BaseModel):
+    spec_version: str = SPEC_VERSION
+    dataset: str
+    shapelet_id: str
+    scope: str
+    omega: float
+    row_index: int
+    time_bin_index: int
+    time_start: int
+    time_end: int
+    row_size: int
+    cell_value: float
+    exceed_ratio: float
+    sample_ids: list[str]
+    activation_median: list[float]
+    sequence_median: list[float]
+    members: list[ShapeletMatrixCellMember]
     warnings: list[ApiWarning] = Field(default_factory=list)
 
 

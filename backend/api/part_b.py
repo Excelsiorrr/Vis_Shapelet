@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query
 from backend.core.constants import DEFAULT_EXPLAIN_OMEGA
 from backend.schemas.part_b import (
     ShapeletClassStatsResponse,
+    ShapeletMatrixCellDetailResponse,
     ShapeletDetailResponse,
     ShapeletGalleryListResponse,
     ShapeletHistogramResponse,
@@ -81,6 +82,38 @@ def get_shapelet_matrix_summary(
     return service.get_matrix_summary(
         dataset_name,
         shapelet_id,
+        scope,
+        omega,
+        time_bins,
+        row_bins,
+        aggregation,
+        normalization,
+        sort_mode,
+    )
+
+
+@router.get(
+    "/datasets/{dataset_name}/shapelets/{shapelet_id}/stats/matrix-cell-detail",
+    response_model=ShapeletMatrixCellDetailResponse,
+)
+def get_shapelet_matrix_cell_detail(
+    dataset_name: str,
+    shapelet_id: str,
+    row_index: int = Query(ge=0),
+    time_bin_index: int = Query(ge=0),
+    scope: str = Query(default="test"),
+    omega: float = Query(default=DEFAULT_EXPLAIN_OMEGA),
+    time_bins: int = Query(default=180, ge=24, le=400),
+    row_bins: int = Query(default=120, ge=24, le=300),
+    aggregation: str = Query(default="max"),
+    normalization: str = Query(default="none"),
+    sort_mode: str = Query(default="peak_position"),
+) -> ShapeletMatrixCellDetailResponse:
+    return service.get_matrix_cell_detail(
+        dataset_name,
+        shapelet_id,
+        row_index,
+        time_bin_index,
         scope,
         omega,
         time_bins,

@@ -22,6 +22,8 @@ from backend.schemas.part_b import (
     ShapeletGalleryListResponse,
     ShapeletHistogramResponse,
     ShapeletLibraryMetaResponse,
+    ShapeletMatrixCellDetailResponse,
+    ShapeletMatrixCellMember,
     ShapeletMatrixSummaryResponse,
     ShapeletStatsSummaryResponse,
     ShapeletTopHitsResponse,
@@ -57,6 +59,26 @@ class PredictionBundle:
     preds: np.ndarray  # [N]
     probs: np.ndarray  # [N, C]
     warnings: list[ApiWarning]
+
+
+@dataclass
+class MatrixViewBundle:
+    """Prepared matrix view reused by summary and cell-detail endpoints."""
+
+    order: np.ndarray  # [N]
+    matrix: np.ndarray  # [N, T]
+    bucketed: np.ndarray  # [N, B]
+    compressed: np.ndarray  # [R, B]
+    time_edges: np.ndarray  # [B + 1]
+    row_edges: np.ndarray  # [R + 1]
+    row_sizes: list[int]
+    representative_sample_ids: list[str]
+    representative_curves: list[list[float]]
+    exceed_ratio: list[float]
+    summary_median: np.ndarray  # [B]
+    summary_q25: np.ndarray  # [B]
+    summary_q75: np.ndarray  # [B]
+    value_range: list[float]
 
 
 def _to_tensor(value: Any) -> torch.Tensor:
@@ -508,7 +530,7 @@ class PartBService:
             warnings=warnings,
         )
 
-    def get_matrix_summary(
+    def _build_matrix_view(
         self,
         dataset_name: str,
         shapelet_id: str,
@@ -519,8 +541,8 @@ class PartBService:
         aggregation: str,
         normalization: str,
         sort_mode: str,
-    ) -> ShapeletMatrixSummaryResponse:
-        """Return a compressed time x sample matrix summary for one shapelet."""
+    ) -> tuple[Any, list[ApiWarning], MatrixViewBundle, np.ndarray]:
+        """Prepare sorted and compressed matrix artifacts shared by multiple Part B views."""
 
         bundle = self.part_a_service.load_dataset_bundle(dataset_name)
         normalized_scope = self._validate_scope(scope)
@@ -561,8 +583,8 @@ class PartBService:
         bucketed_cols: list[np.ndarray] = []
         exceed_ratio: list[float] = []
         for start, end in zip(time_edges[:-1], time_edges[1:]):
-            end = max(end, start + 1)
-            window = matrix[:, start:end]
+            end = max(int(end), int(start) + 1)
+            window = matrix[:, int(start):end]
             if normalized_aggregation == "max":
                 col = window.max(axis=1)
             elif normalized_aggregation == "median":
@@ -578,35 +600,202 @@ class PartBService:
         row_edges[-1] = sample_count
         compressed_rows: list[np.ndarray] = []
         row_sizes: list[int] = []
+        representative_sample_ids: list[str] = []
+        representative_curves: list[list[float]] = []
+        sorted_peak_values = peak_values[order]
         for start, end in zip(row_edges[:-1], row_edges[1:]):
-            end = max(end, start + 1)
-            window = bucketed[start:end, :]
+            start_int = int(start)
+            end_int = max(int(end), start_int + 1)
+            window = bucketed[start_int:end_int, :]
             compressed_rows.append(np.median(window, axis=0).astype(np.float32))
-            row_sizes.append(int(end - start))
+            row_sizes.append(int(end_int - start_int))
+            row_peak_values = sorted_peak_values[start_int:end_int]
+            local_best = int(np.argmax(row_peak_values))
+            representative_idx = int(order[start_int + local_best])
+            representative_sample_ids.append(str(representative_idx))
+            representative_curves.append([float(v) for v in bucketed[start_int + local_best, :].tolist()])
 
         compressed = np.stack(compressed_rows, axis=0)  # [R, B]
         summary_median = np.median(bucketed, axis=0)
         summary_q25 = np.quantile(bucketed, 0.25, axis=0)
         summary_q75 = np.quantile(bucketed, 0.75, axis=0)
 
+        return (
+            bundle,
+            warnings,
+            MatrixViewBundle(
+                order=order,
+                matrix=matrix,
+                bucketed=bucketed,
+                compressed=compressed,
+                time_edges=time_edges,
+                row_edges=row_edges,
+                row_sizes=row_sizes,
+                representative_sample_ids=representative_sample_ids,
+                representative_curves=representative_curves,
+                exceed_ratio=exceed_ratio,
+                summary_median=summary_median,
+                summary_q25=summary_q25,
+                summary_q75=summary_q75,
+                value_range=[float(compressed.min()), float(compressed.max())],
+            ),
+            data.labels,
+        )
+
+    def get_matrix_summary(
+        self,
+        dataset_name: str,
+        shapelet_id: str,
+        scope: str,
+        omega: float,
+        time_bins: int,
+        row_bins: int,
+        aggregation: str,
+        normalization: str,
+        sort_mode: str,
+    ) -> ShapeletMatrixSummaryResponse:
+        """Return a compressed time x sample matrix summary for one shapelet."""
+        (
+            bundle,
+            warnings,
+            matrix_view,
+            _,
+        ) = self._build_matrix_view(
+            dataset_name,
+            shapelet_id,
+            scope,
+            omega,
+            time_bins,
+            row_bins,
+            aggregation,
+            normalization,
+            sort_mode,
+        )
+        normalized_scope = self._validate_scope(scope)
+        normalized_omega = self._validate_omega(omega)
+        normalized_aggregation = self._validate_matrix_aggregation(aggregation)
+        normalized_normalization = self._validate_matrix_normalization(normalization)
+        normalized_sort = self._validate_matrix_sort(sort_mode)
+
         return ShapeletMatrixSummaryResponse(
             dataset=bundle.dataset_name,
             shapelet_id=shapelet_id,
             scope=normalized_scope,
             omega=normalized_omega,
-            time_bins=int(bucketed.shape[1]),
-            row_bins=int(compressed.shape[0]),
+            time_bins=int(matrix_view.bucketed.shape[1]),
+            row_bins=int(matrix_view.compressed.shape[0]),
             aggregation=normalized_aggregation,
             normalization=normalized_normalization,
             sort_mode=normalized_sort,
-            time_edges=[int(v) for v in time_edges.tolist()],
-            row_sizes=row_sizes,
-            matrix=[[float(v) for v in row.tolist()] for row in compressed],
-            summary_median=[float(v) for v in summary_median.tolist()],
-            summary_q25=[float(v) for v in summary_q25.tolist()],
-            summary_q75=[float(v) for v in summary_q75.tolist()],
-            exceed_ratio=exceed_ratio,
-            value_range=[float(compressed.min()), float(compressed.max())],
+            time_edges=[int(v) for v in matrix_view.time_edges.tolist()],
+            row_sizes=matrix_view.row_sizes,
+            representative_sample_ids=matrix_view.representative_sample_ids,
+            representative_curves=matrix_view.representative_curves,
+            matrix=[[float(v) for v in row.tolist()] for row in matrix_view.compressed],
+            summary_median=[float(v) for v in matrix_view.summary_median.tolist()],
+            summary_q25=[float(v) for v in matrix_view.summary_q25.tolist()],
+            summary_q75=[float(v) for v in matrix_view.summary_q75.tolist()],
+            exceed_ratio=matrix_view.exceed_ratio,
+            value_range=matrix_view.value_range,
+            warnings=warnings,
+        )
+
+    def get_matrix_cell_detail(
+        self,
+        dataset_name: str,
+        shapelet_id: str,
+        row_index: int,
+        time_bin_index: int,
+        scope: str,
+        omega: float,
+        time_bins: int,
+        row_bins: int,
+        aggregation: str,
+        normalization: str,
+        sort_mode: str,
+    ) -> ShapeletMatrixCellDetailResponse:
+        """Return all samples contained in one matrix cell plus aligned raw/activation curves."""
+
+        (
+            bundle,
+            warnings,
+            matrix_view,
+            labels,
+        ) = self._build_matrix_view(
+            dataset_name,
+            shapelet_id,
+            scope,
+            omega,
+            time_bins,
+            row_bins,
+            aggregation,
+            normalization,
+            sort_mode,
+        )
+        normalized_scope = self._validate_scope(scope)
+        normalized_omega = self._validate_omega(omega)
+
+        row_count = int(matrix_view.compressed.shape[0])
+        col_count = int(matrix_view.bucketed.shape[1])
+        if row_index < 0 or row_index >= row_count:
+            raise HTTPException(status_code=400, detail=f"row_index must be between 0 and {row_count - 1}")
+        if time_bin_index < 0 or time_bin_index >= col_count:
+            raise HTTPException(status_code=400, detail=f"time_bin_index must be between 0 and {col_count - 1}")
+
+        row_start = int(matrix_view.row_edges[row_index])
+        row_end = max(int(matrix_view.row_edges[row_index + 1]), row_start + 1)
+        member_indices = matrix_view.order[row_start:row_end]
+        if member_indices.size == 0:
+            raise HTTPException(status_code=500, detail="Selected matrix cell does not contain any samples")
+
+        x, _, _ = self._scope_sequences_and_labels(dataset_name, normalized_scope)
+        sequence_np = x.detach().cpu().numpy()
+        if sequence_np.ndim != 3:
+            raise HTTPException(status_code=500, detail="Scoped sequence tensor must be 3D for cell detail")
+
+        predictions = self._cached_predictions(dataset_name, normalized_scope)
+        members: list[ShapeletMatrixCellMember] = []
+        raw_curves: list[np.ndarray] = []
+        activation_curves: list[np.ndarray] = []
+        for local_offset, scoped_idx in enumerate(member_indices.tolist()):
+            seq_curve = sequence_np[int(scoped_idx), :, 0].astype(np.float32)
+            act_curve = matrix_view.matrix[row_start + local_offset, :].astype(np.float32)
+            raw_curves.append(seq_curve)
+            activation_curves.append(act_curve)
+            pred_probs = predictions.probs[int(scoped_idx)] if int(scoped_idx) < len(predictions.probs) else np.array([])
+            members.append(
+                ShapeletMatrixCellMember(
+                    sample_id=str(int(scoped_idx)),
+                    label=int(labels[int(scoped_idx)]) if int(scoped_idx) < len(labels) else None,
+                    pred_class=int(predictions.preds[int(scoped_idx)]) if int(scoped_idx) < len(predictions.preds) else None,
+                    margin=_margin_from_probs(pred_probs) if pred_probs.size else None,
+                    activation_curve=[float(v) for v in act_curve.tolist()],
+                    sequence_curve=[float(v) for v in seq_curve.tolist()],
+                    activation_peak=float(act_curve.max()) if act_curve.size else 0.0,
+                )
+            )
+
+        raw_matrix = np.stack(raw_curves, axis=0)
+        activation_matrix = np.stack(activation_curves, axis=0)
+        time_start = int(matrix_view.time_edges[time_bin_index])
+        time_end = max(int(matrix_view.time_edges[time_bin_index + 1]) - 1, time_start)
+
+        return ShapeletMatrixCellDetailResponse(
+            dataset=bundle.dataset_name,
+            shapelet_id=shapelet_id,
+            scope=normalized_scope,
+            omega=normalized_omega,
+            row_index=int(row_index),
+            time_bin_index=int(time_bin_index),
+            time_start=time_start,
+            time_end=time_end,
+            row_size=int(len(members)),
+            cell_value=float(matrix_view.compressed[row_index, time_bin_index]),
+            exceed_ratio=float(matrix_view.exceed_ratio[time_bin_index]),
+            sample_ids=[member.sample_id for member in members],
+            activation_median=[float(v) for v in np.median(activation_matrix, axis=0).tolist()],
+            sequence_median=[float(v) for v in np.median(raw_matrix, axis=0).tolist()],
+            members=members,
             warnings=warnings,
         )
 
