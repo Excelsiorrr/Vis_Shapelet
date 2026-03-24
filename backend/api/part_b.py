@@ -9,6 +9,7 @@ from backend.schemas.part_b import (
     ShapeletGalleryListResponse,
     ShapeletHistogramResponse,
     ShapeletLibraryMetaResponse,
+    ShapeletMatrixSummaryResponse,
     ShapeletStatsSummaryResponse,
     ShapeletTopHitsResponse,
 )
@@ -60,6 +61,34 @@ def get_shapelet_histogram(
     range_max: float | None = Query(default=None),
 ) -> ShapeletHistogramResponse:
     return service.get_histogram(dataset_name, scope, hist_mode, shapelet_id, bins, density, range_min, range_max)
+
+
+@router.get(
+    "/datasets/{dataset_name}/shapelets/{shapelet_id}/stats/matrix-summary",
+    response_model=ShapeletMatrixSummaryResponse,
+)
+def get_shapelet_matrix_summary(
+    dataset_name: str,
+    shapelet_id: str,
+    scope: str = Query(default="test"),
+    omega: float = Query(default=DEFAULT_EXPLAIN_OMEGA),
+    time_bins: int = Query(default=180, ge=24, le=400),
+    row_bins: int = Query(default=120, ge=24, le=300),
+    aggregation: str = Query(default="max"),
+    normalization: str = Query(default="none"),
+    sort_mode: str = Query(default="peak_position"),
+) -> ShapeletMatrixSummaryResponse:
+    return service.get_matrix_summary(
+        dataset_name,
+        shapelet_id,
+        scope,
+        omega,
+        time_bins,
+        row_bins,
+        aggregation,
+        normalization,
+        sort_mode,
+    )
 
 
 @router.get("/datasets/{dataset_name}/shapelets/{shapelet_id}/stats/classes", response_model=ShapeletClassStatsResponse)

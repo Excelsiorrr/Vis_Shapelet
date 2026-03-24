@@ -22,6 +22,7 @@ from backend.schemas.part_b import (
     ShapeletGalleryListResponse,
     ShapeletHistogramResponse,
     ShapeletLibraryMetaResponse,
+    ShapeletMatrixSummaryResponse,
     ShapeletStatsSummaryResponse,
     ShapeletTopHitsResponse,
     SupportSummary,
@@ -32,6 +33,9 @@ from backend.services.part_a_service import PartAService
 _SCOPE_VALUES = {"test", "train", "all"}
 _HIST_MODE_VALUES = {"per_shapelet", "global"}
 _RANK_METRIC_VALUES = {"max_i", "trigger_score"}
+_MATRIX_AGGREGATION_VALUES = {"max", "mean", "median"}
+_MATRIX_NORMALIZATION_VALUES = {"none", "per_sample_minmax"}
+_MATRIX_SORT_VALUES = {"peak_position", "peak_value"}
 _SHAPELET_ID_RE = re.compile(r"\d+")
 
 
@@ -154,6 +158,33 @@ class PartBService:
         normalized = rank_metric.lower().strip()
         if normalized not in _RANK_METRIC_VALUES:
             raise HTTPException(status_code=400, detail=f"rank_metric must be one of: {sorted(_RANK_METRIC_VALUES)}")
+        return normalized
+
+    def _validate_matrix_aggregation(self, aggregation: str) -> str:
+        normalized = aggregation.lower().strip()
+        if normalized not in _MATRIX_AGGREGATION_VALUES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"aggregation must be one of: {sorted(_MATRIX_AGGREGATION_VALUES)}",
+            )
+        return normalized
+
+    def _validate_matrix_normalization(self, normalization: str) -> str:
+        normalized = normalization.lower().strip()
+        if normalized not in _MATRIX_NORMALIZATION_VALUES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"normalization must be one of: {sorted(_MATRIX_NORMALIZATION_VALUES)}",
+            )
+        return normalized
+
+    def _validate_matrix_sort(self, sort_mode: str) -> str:
+        normalized = sort_mode.lower().strip()
+        if normalized not in _MATRIX_SORT_VALUES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"sort_mode must be one of: {sorted(_MATRIX_SORT_VALUES)}",
+            )
         return normalized
 
     def _validate_omega(self, omega: float) -> float:
@@ -474,6 +505,108 @@ class PartBService:
             range=hist_range,
             counts=[float(v) for v in counts.tolist()],
             bin_edges=[float(v) for v in bin_edges.tolist()],
+            warnings=warnings,
+        )
+
+    def get_matrix_summary(
+        self,
+        dataset_name: str,
+        shapelet_id: str,
+        scope: str,
+        omega: float,
+        time_bins: int,
+        row_bins: int,
+        aggregation: str,
+        normalization: str,
+        sort_mode: str,
+    ) -> ShapeletMatrixSummaryResponse:
+        """Return a compressed time x sample matrix summary for one shapelet."""
+
+        bundle = self.part_a_service.load_dataset_bundle(dataset_name)
+        normalized_scope = self._validate_scope(scope)
+        normalized_omega = self._validate_omega(omega)
+        normalized_aggregation = self._validate_matrix_aggregation(aggregation)
+        normalized_normalization = self._validate_matrix_normalization(normalization)
+        normalized_sort = self._validate_matrix_sort(sort_mode)
+
+        data = self._cached_activations(dataset_name, normalized_scope)
+        warnings = list(data.warnings)
+        p_idx = self._parse_shapelet_index(shapelet_id, data.max_scores.shape[1])
+
+        matrix = data.activations[:, :, p_idx].astype(np.float32)  # [N, T]
+        sample_count, seq_len = matrix.shape
+        if sample_count == 0 or seq_len == 0:
+            raise HTTPException(status_code=500, detail="No activation matrix available for matrix summary")
+
+        peak_positions = matrix.argmax(axis=1)
+        peak_values = matrix.max(axis=1)
+
+        if normalized_sort == "peak_position":
+            order = np.lexsort((-peak_values, peak_positions))
+        else:
+            order = np.lexsort((peak_positions, -peak_values))
+        matrix = matrix[order]
+
+        if normalized_normalization == "per_sample_minmax":
+            row_min = matrix.min(axis=1, keepdims=True)
+            row_max = matrix.max(axis=1, keepdims=True)
+            span = np.maximum(row_max - row_min, 1e-9)
+            matrix = (matrix - row_min) / span
+
+        effective_time_bins = max(1, min(int(time_bins), int(seq_len)))
+        effective_row_bins = max(1, min(int(row_bins), int(sample_count)))
+
+        time_edges = np.linspace(0, seq_len, num=effective_time_bins + 1, dtype=int)
+        time_edges[-1] = seq_len
+        bucketed_cols: list[np.ndarray] = []
+        exceed_ratio: list[float] = []
+        for start, end in zip(time_edges[:-1], time_edges[1:]):
+            end = max(end, start + 1)
+            window = matrix[:, start:end]
+            if normalized_aggregation == "max":
+                col = window.max(axis=1)
+            elif normalized_aggregation == "median":
+                col = np.median(window, axis=1)
+            else:
+                col = window.mean(axis=1)
+            bucketed_cols.append(col.astype(np.float32))
+            exceed_ratio.append(float(np.mean(window >= normalized_omega)))
+
+        bucketed = np.stack(bucketed_cols, axis=1)  # [N, B]
+
+        row_edges = np.linspace(0, sample_count, num=effective_row_bins + 1, dtype=int)
+        row_edges[-1] = sample_count
+        compressed_rows: list[np.ndarray] = []
+        row_sizes: list[int] = []
+        for start, end in zip(row_edges[:-1], row_edges[1:]):
+            end = max(end, start + 1)
+            window = bucketed[start:end, :]
+            compressed_rows.append(np.median(window, axis=0).astype(np.float32))
+            row_sizes.append(int(end - start))
+
+        compressed = np.stack(compressed_rows, axis=0)  # [R, B]
+        summary_median = np.median(bucketed, axis=0)
+        summary_q25 = np.quantile(bucketed, 0.25, axis=0)
+        summary_q75 = np.quantile(bucketed, 0.75, axis=0)
+
+        return ShapeletMatrixSummaryResponse(
+            dataset=bundle.dataset_name,
+            shapelet_id=shapelet_id,
+            scope=normalized_scope,
+            omega=normalized_omega,
+            time_bins=int(bucketed.shape[1]),
+            row_bins=int(compressed.shape[0]),
+            aggregation=normalized_aggregation,
+            normalization=normalized_normalization,
+            sort_mode=normalized_sort,
+            time_edges=[int(v) for v in time_edges.tolist()],
+            row_sizes=row_sizes,
+            matrix=[[float(v) for v in row.tolist()] for row in compressed],
+            summary_median=[float(v) for v in summary_median.tolist()],
+            summary_q25=[float(v) for v in summary_q25.tolist()],
+            summary_q75=[float(v) for v in summary_q75.tolist()],
+            exceed_ratio=exceed_ratio,
+            value_range=[float(compressed.min()), float(compressed.max())],
             warnings=warnings,
         )
 

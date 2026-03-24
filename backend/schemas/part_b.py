@@ -82,6 +82,28 @@ class ShapeletHistogramResponse(BaseModel):
     warnings: list[ApiWarning] = Field(default_factory=list)
 
 
+class ShapeletMatrixSummaryResponse(BaseModel):
+    spec_version: str = SPEC_VERSION
+    dataset: str
+    shapelet_id: str
+    scope: str
+    omega: float
+    time_bins: int
+    row_bins: int
+    aggregation: str
+    normalization: str
+    sort_mode: str
+    time_edges: list[int]
+    row_sizes: list[int]
+    matrix: list[list[float]]
+    summary_median: list[float]
+    summary_q25: list[float]
+    summary_q75: list[float]
+    exceed_ratio: list[float]
+    value_range: list[float]
+    warnings: list[ApiWarning] = Field(default_factory=list)
+
+
 class ShapeletClassStatsItem(BaseModel):
     class_id: int
     prior: float
