@@ -17,7 +17,7 @@
 
 ### 1.2 MVP 范围（首版）
 - 包含: `Part A + Part C + Part E` 的可用闭环（v1 暂不依赖 Part D）。
-- 包含: `Part B` 的只读能力（shapelet 浏览、分布统计、阈值调节）。
+- 包含: `Part B` 的只读能力（shapelet 浏览、`I` 总览、统计分析、双阈值调节）。
 - 不含: 在线训练和在线编辑 shapelet 原型（只加载 checkpoint）。
 - 不含: 多用户权限体系（先单用户/本地）。
 
@@ -87,6 +87,9 @@
 - 输入:
   - checkpoint 中 shapelet/prototype
   - 匹配分数 `I[p,t]`（模型原生输出）
+  - 双阈值结构（冻结）:
+    - `omega`: 样本级触发统计阈值
+    - `seg_threshold`: activation 曲线切段阈值（候选段生成）
   - 触发定义（冻结）:
     - `trigger_{n,p}(Omega) = 1{max_t I_{n,p,t} >= Omega}`
     - 含义: 对样本 `n` 的 shapelet `p`，只要存在任一时间点达到阈值即记为触发
@@ -106,23 +109,36 @@
     - 触发次数统计、类别覆盖统计（含类别不平衡修正）
     - `I` 分布直方图（默认单个 shapelet 视图）
     - 统计口径回显: `scope`, `omega`（`granularity` 在 v1 由接口类型隐式表达，不单独回显）
+  - candidate segment preview（动态，`seg_threshold` 相关）:
+    - 用于切段的 activation-derived curve
+    - `seg_threshold`
+    - 候选段列表 `segments=[(t_start,t_end), ...]`
+    - 轻量摘要: `segment_count`, `covered_ratio`, `longest_segment`
   - 接口拆分原则（禁止重型总接口）:
     - 首屏仅加载 `meta`（轻量、阈值无关）
     - `gallery list` 与 `gallery detail` 分开；列表必须分页
     - `stats summary`、`histogram`、`class stats` 分开按需异步请求
+    - `candidate segment preview` 与 `stats summary` 分开；`seg_threshold` 变化时只刷新前者
     - `top-hits samples` 作为 B->C 联动专用接口，分页按需请求（唯一正式样本来源）
     - 阈值 `omega` 或 `scope` 变化时，仅刷新 `stats` 相关接口与 `top-hits samples`，不重拉 `gallery/meta`
+    - 阈值 `seg_threshold` 变化时，仅刷新 candidate segment preview，不重拉 `stats/gallery/meta`
     - 不提供单一 `/overview` 或等价“全量打包”接口
   - 建议请求流:
-    - `meta -> gallery list -> (shapelet detail + stats summary + histogram + class stats + top-hits samples)`
+    - `meta -> gallery list -> (shapelet detail + histogram panel + candidate segment preview + stats summary + class stats + top-hits samples)`
 - 交互:
   - 选择 shapelet 后，先拉取该 shapelet 的 `top-hits samples`，再选择样本进入 Part C
   - 阈值预览（边界冻结）:
-    - 不触发训练流程
-    - 不修改模型参数与 checkpoint
-    - 仅影响 Part B / Part C / Part E 的统计与可视化结果
+    - `omega`:
+      - 不触发训练流程
+      - 不修改模型参数与 checkpoint
+      - 仅影响 Part B / Part C / Part E 的触发统计与解释上下文
+    - `seg_threshold`:
+      - 不触发训练流程
+      - 不修改模型参数与 checkpoint
+      - 仅影响 Part B candidate segment preview 与后续 Part E 候选段来源
   - 支持切换 `scope`（默认 `test`）
   - `I` 直方图支持“单个 shapelet / 全局汇总”视图切换（默认单个 shapelet）
+  - candidate segment preview 支持滑动 `seg_threshold`，实时查看候选段变化
   - B->C 联动契约（冻结）:
     - 必带字段: `dataset`, `sample_id`, `shapelet_id`, `scope`, `omega`, `source_panel='part_b'`
     - 可选字段: `trigger_score`, `rank`, `rank_metric`
@@ -149,7 +165,8 @@
   - 小样本类别下 `class_trigger_rate/lift` 方差较大；当前通过 `alpha=1.0` 与 `min_support=20` 缓解，但仍需 warning 提示
   - `global` 直方图会掩盖单个 shapelet 差异，默认应使用 `per_shapelet` 视图
   - `sample_ids_preview` 仅为轻量预览字段，不作为 B->C 正式跳转数据源
-  - 历史固定阈值常量路径（`shapeX.py` 中按数据集分支使用 `0.5/0.4`）已废弃；v1 统一由全局 `omega` 驱动 B/C/E
+  - `seg_threshold` 与 `omega` 不是同一个变量；前者负责切段，后者负责触发统计
+  - 当前 `shapeX.py` 中仍存在按数据集分支使用的 `0.5/0.4` 历史阈值路径；v1 需要在 Part B / Part E 文档中统一回收为 `seg_threshold` 口径，而不能再混称为 `omega`
 
 - 默认值来源（冻结）:
   - `omega_default` 的单一真源为解释配置（`explain.omega`，可按数据集覆盖）
@@ -308,6 +325,7 @@
 - 输出分层约束:
   - `gallery` 仅包含阈值无关字段
   - `global_trigger_rate / class_trigger_rate` 仅在 `stats` 中返回，且必须依赖并回传 `omega`
+  - `candidate segments` 仅在切段预览接口中返回，且必须依赖并回传 `seg_threshold`
 - 统计范围:
   - 默认 `scope = test`
   - `scope = train` 仅用于训练行为诊断
@@ -325,6 +343,8 @@
   - `trigger` 由服务端按请求参数实时计算: `trigger_{n,p}(Omega) = 1{max_t I_{n,p,t} >= Omega}`
   - `omega` 调整属于解释后处理: 不触发训练、不更新模型权重，仅重算 B/C/E 的统计与可视化派生结果
   - 响应中必须回传 `scope`、`omega` 以保证可追溯；`granularity` 在 v1 由接口类型隐式确定
+  - `seg_threshold` 调整属于候选段后处理: 不触发训练、不更新模型权重，仅重算 activation 曲线切段结果
+  - 响应中必须回传 `seg_threshold` 以及切段信号类型，以保证候选段来源可追溯
 - 类别覆盖与不平衡修正（冻结）:
   - 记号:
     - `N`: 当前 `scope` 的样本数
@@ -356,6 +376,18 @@
     - 归一化默认开启（density）
   - 响应回显:
     - 必须回传 `hist_mode`, `bins`, `range`, `density`, `scope`
+
+## 3.4.1 Part B 双阈值结构（冻结）
+- `omega`：
+  - 链路：`activations -> max_t I -> trigger`
+  - 作用：Part B 统计、Part C 证据高亮、Part E 解释上下文
+- `seg_threshold`：
+  - 链路：`activations -> activation-derived curve -> threshold -> segments`
+  - 作用：Part B 候选段预览、Part E 候选段来源
+- 约束：
+  - 不允许在文档或 UI 中把 `omega` 和 `seg_threshold` 混称为同一个阈值
+  - `omega` 负责回答“有没有触发”
+  - `seg_threshold` 负责回答“应该在哪里切段”
 
 ## 3.5 扰动函数（SDSL what-if）
 - 价值函数:
@@ -495,9 +527,10 @@
   - 后续改进空间: 可补充 `PMI`、加权 lift、置信区间或显著性检验，用于减少小样本类别的统计波动
 - R6: 在线训练完全移出首版；v1 只支持加载已有 checkpoint 做推理、匹配与单 segment what-if 解释计算
   - 后续改进空间: 可在后续版本增加异步训练任务、训练进度查询、训练结果版本管理与训练后自动刷新可视分析结果
-- R7: 阈值统一策略
-  - v1: 统一全局 `omega`，用于 Part B 统计、Part C 证据高亮、Part E what-if
-  - v1: 历史固定阈值常量路径（`0.5/0.4`）不再作为业务口径，仅保留迁移期兼容说明
+- R7: 阈值分层策略
+  - v1: `omega` 用于 Part B 统计、Part C 证据高亮、Part E 解释上下文
+  - v1: `seg_threshold` 用于 Part B 候选段预览与 Part E 候选段来源
+  - v1: 历史固定阈值常量路径（`0.5/0.4`）不再直接暴露为业务口径；迁移后统一对外命名为 `seg_threshold`
 - R8: `granularity` 参数化策略
   - v1: `granularity` 仅作为概念口径，不作为 Part B API 的请求参数或回显字段
   - v1.1 目标: 评估是否引入显式 `granularity` 参数（或聚合接口）以统一样本级/时间点级统计入口

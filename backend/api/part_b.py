@@ -5,11 +5,13 @@ from fastapi import APIRouter, Query
 from backend.core.constants import DEFAULT_EXPLAIN_OMEGA
 from backend.schemas.part_b import (
     ShapeletClassStatsResponse,
+    ShapeletEvidenceTopMatchesResponse,
     ShapeletMatrixCellDetailResponse,
     ShapeletDetailResponse,
     ShapeletGalleryListResponse,
     ShapeletHistogramResponse,
     ShapeletLibraryMetaResponse,
+    ShapeletSegmentPreviewResponse,
     ShapeletMatrixSummaryResponse,
     ShapeletStatsSummaryResponse,
     ShapeletTopHitsResponse,
@@ -62,6 +64,32 @@ def get_shapelet_histogram(
     range_max: float | None = Query(default=None),
 ) -> ShapeletHistogramResponse:
     return service.get_histogram(dataset_name, scope, hist_mode, shapelet_id, bins, density, range_min, range_max)
+
+
+@router.get(
+    "/datasets/{dataset_name}/shapelets/{shapelet_id}/segments/preview",
+    response_model=ShapeletSegmentPreviewResponse,
+)
+def get_shapelet_segment_preview(
+    dataset_name: str,
+    shapelet_id: str,
+    scope: str = Query(default="test"),
+    seg_threshold: float | None = Query(default=None),
+) -> ShapeletSegmentPreviewResponse:
+    return service.get_segment_preview(dataset_name, shapelet_id, scope, seg_threshold)
+
+
+@router.get(
+    "/datasets/{dataset_name}/shapelets/{shapelet_id}/evidence/top-matches",
+    response_model=ShapeletEvidenceTopMatchesResponse,
+)
+def get_shapelet_evidence_top_matches(
+    dataset_name: str,
+    shapelet_id: str,
+    scope: str = Query(default="test"),
+    limit: int = Query(default=12, ge=1, le=50),
+) -> ShapeletEvidenceTopMatchesResponse:
+    return service.get_evidence_top_matches(dataset_name, shapelet_id, scope, limit)
 
 
 @router.get(
@@ -140,8 +168,9 @@ def get_shapelet_top_hits(
     shapelet_id: str,
     scope: str = Query(default="test"),
     omega: float = Query(default=DEFAULT_EXPLAIN_OMEGA),
+    class_id: int | None = Query(default=None),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=200),
     rank_metric: str = Query(default="max_i"),
 ) -> ShapeletTopHitsResponse:
-    return service.get_top_hits(dataset_name, shapelet_id, scope, omega, offset, limit, rank_metric)
+    return service.get_top_hits(dataset_name, shapelet_id, scope, omega, class_id, offset, limit, rank_metric)

@@ -82,6 +82,55 @@ class ShapeletHistogramResponse(BaseModel):
     warnings: list[ApiWarning] = Field(default_factory=list)
 
 
+class ShapeletSegmentPreviewItem(BaseModel):
+    start: int
+    end: int
+    length: int
+    peak_value: float
+
+
+class ShapeletSegmentPreviewResponse(BaseModel):
+    spec_version: str = SPEC_VERSION
+    dataset: str
+    shapelet_id: str
+    scope: str
+    seg_threshold: float
+    signal_type: str
+    time_axis: list[int]
+    curve: list[float]
+    segments: list[ShapeletSegmentPreviewItem]
+    segment_count: int
+    covered_ratio: float
+    longest_segment: int
+    warnings: list[ApiWarning] = Field(default_factory=list)
+
+
+class ShapeletEvidenceMatchItem(BaseModel):
+    sample_id: str
+    rank: int
+    label: int | None
+    pred_class: int | None
+    margin: float | None
+    peak_t: int
+    peak_activation: float
+    t_start: int
+    t_end: int
+    raw_window: list[list[float]]
+    activation_window: list[float]
+
+
+class ShapeletEvidenceTopMatchesResponse(BaseModel):
+    spec_version: str = SPEC_VERSION
+    dataset: str
+    shapelet_id: str
+    scope: str
+    shapelet_length: int
+    rank_metric: str
+    limit: int
+    items: list[ShapeletEvidenceMatchItem]
+    warnings: list[ApiWarning] = Field(default_factory=list)
+
+
 class ShapeletMatrixSummaryResponse(BaseModel):
     spec_version: str = SPEC_VERSION
     dataset: str
@@ -161,6 +210,9 @@ class TopHitSampleItem(BaseModel):
     label: int | None
     pred_class: int | None
     margin: float | None
+    peak_t: int
+    t_start: int
+    t_end: int
 
 
 class ShapeletTopHitsResponse(BaseModel):
@@ -169,6 +221,8 @@ class ShapeletTopHitsResponse(BaseModel):
     shapelet_id: str
     scope: str
     omega: float
+    class_id: int | None = None
+    shapelet_length: int
     total: int
     offset: int
     limit: int

@@ -18,10 +18,14 @@ from backend.schemas.part_b import (
     ShapeletClassStatsItem,
     ShapeletClassStatsResponse,
     ShapeletDetailResponse,
+    ShapeletEvidenceMatchItem,
+    ShapeletEvidenceTopMatchesResponse,
     ShapeletGalleryItem,
     ShapeletGalleryListResponse,
     ShapeletHistogramResponse,
     ShapeletLibraryMetaResponse,
+    ShapeletSegmentPreviewItem,
+    ShapeletSegmentPreviewResponse,
     ShapeletMatrixCellDetailResponse,
     ShapeletMatrixCellMember,
     ShapeletMatrixSummaryResponse,
@@ -31,6 +35,7 @@ from backend.schemas.part_b import (
     TopHitSampleItem,
 )
 from backend.services.part_a_service import PartAService
+from shapeX import fill_short_negative_sequences, moving_average_centered, segment_sequence_ones
 
 _SCOPE_VALUES = {"test", "train", "all"}
 _HIST_MODE_VALUES = {"per_shapelet", "global"}
@@ -213,6 +218,17 @@ class PartBService:
         if not math.isfinite(omega):
             raise HTTPException(status_code=400, detail="omega must be a finite float")
         return float(omega)
+
+    def _validate_seg_threshold(self, seg_threshold: float) -> float:
+        if not math.isfinite(seg_threshold):
+            raise HTTPException(status_code=400, detail="seg_threshold must be a finite float")
+        return float(seg_threshold)
+
+    def _segment_defaults(self, dataset_name: str) -> tuple[float, str]:
+        normalized = (dataset_name or "").lower()
+        if normalized == "mitecg" or "ecg" in normalized:
+            return 0.5, "mean_shapelet_activation_filled"
+        return 0.4, "mean_shapelet_activation_smoothed"
 
     def _parse_shapelet_index(self, shapelet_id: str, num_shapelets: int) -> int:
         """Extract trailing numeric index from shapelet_id and bounds-check it."""
@@ -530,6 +546,199 @@ class PartBService:
             warnings=warnings,
         )
 
+    def get_segment_preview(
+        self,
+        dataset_name: str,
+        shapelet_id: str,
+        scope: str,
+        seg_threshold: float | None,
+    ) -> ShapeletSegmentPreviewResponse:
+        """Return a shapelet-level candidate-segment preview driven by seg_threshold.
+
+        This first version uses the selected shapelet's mean activation curve across the
+        scoped dataset as a stable preview signal, then applies dataset-specific
+        post-processing inspired by the current shapeX segmentation branches.
+        """
+
+        bundle = self.part_a_service.load_dataset_bundle(dataset_name)
+        normalized_scope = self._validate_scope(scope)
+        default_threshold, signal_type = self._segment_defaults(dataset_name)
+        normalized_threshold = self._validate_seg_threshold(
+            default_threshold if seg_threshold is None else seg_threshold
+        )
+
+        data = self._cached_activations(dataset_name, normalized_scope)
+        warnings = list(data.warnings)
+        p_idx = self._parse_shapelet_index(shapelet_id, data.max_scores.shape[1])
+
+        matrix = data.activations[:, :, p_idx].astype(np.float32)
+        if matrix.size == 0:
+            raise HTTPException(status_code=500, detail="No activation values available for segment preview")
+
+        # MVP choice: aggregate the selected shapelet across scoped samples into one
+        # stable preview curve. This keeps Part B shapelet-centric and avoids binding
+        # the panel to a specific sample before Part E.
+        curve = matrix.mean(axis=0).astype(np.float32)
+
+        normalized_dataset = (dataset_name or "").lower()
+        if normalized_dataset == "mitecg" or "ecg" in normalized_dataset:
+            curve = np.asarray(fill_short_negative_sequences(curve.copy()), dtype=np.float32)
+        else:
+            curve = np.asarray(moving_average_centered(curve, 100), dtype=np.float32)
+
+        mask = (curve > normalized_threshold).astype(int)
+        raw_segments = segment_sequence_ones(mask.tolist())
+        segments = [
+            ShapeletSegmentPreviewItem(
+                start=int(start),
+                end=int(end),
+                length=int(end - start + 1),
+                peak_value=float(np.max(curve[int(start) : int(end) + 1])),
+            )
+            for start, end in raw_segments
+        ]
+
+        covered_points = int(sum(item.length for item in segments))
+        if not segments:
+            warnings.append(
+                ApiWarning(
+                    code="WARN_EMPTY_SEGMENTS",
+                    message="No candidate segments were produced under the current seg_threshold.",
+                )
+            )
+
+        warnings.append(
+            ApiWarning(
+                code="WARN_AGGREGATED_SIGNAL_PREVIEW",
+                message=(
+                    "This first preview uses the selected shapelet's aggregated activation curve across the current "
+                    "scope. It is a shapelet-level candidate-segment preview, not a per-sample segment list."
+                ),
+            )
+        )
+
+        return ShapeletSegmentPreviewResponse(
+            dataset=bundle.dataset_name,
+            shapelet_id=shapelet_id,
+            scope=normalized_scope,
+            seg_threshold=normalized_threshold,
+            signal_type=signal_type,
+            time_axis=[int(i) for i in range(int(curve.shape[0]))],
+            curve=[float(v) for v in curve.tolist()],
+            segments=segments,
+            segment_count=len(segments),
+            covered_ratio=_safe_div(covered_points, int(curve.shape[0])),
+            longest_segment=max((item.length for item in segments), default=0),
+            warnings=warnings,
+        )
+
+    def get_evidence_top_matches(
+        self,
+        dataset_name: str,
+        shapelet_id: str,
+        scope: str,
+        limit: int,
+    ) -> ShapeletEvidenceTopMatchesResponse:
+        """Return top matched real subsequences for one shapelet.
+
+        Part B evidence uses the model's real activation semantics:
+        for each sample, find peak_t = argmax_t I[n,t,p], then extract a local
+        window centered around that peak using the current shapelet length.
+        """
+
+        bundle = self.part_a_service.load_dataset_bundle(dataset_name)
+        normalized_scope = self._validate_scope(scope)
+        data = self._cached_activations(dataset_name, normalized_scope)
+        predictions = self._cached_predictions(dataset_name, normalized_scope)
+        sequences, _, _ = self._scope_sequences_and_labels(dataset_name, normalized_scope)
+        warnings = list(data.warnings)
+
+        gallery_items = self._cached_gallery_items(dataset_name)
+        p_idx = self._parse_shapelet_index(shapelet_id, data.max_scores.shape[1])
+        shapelet_length = int(gallery_items[p_idx].shapelet_len)
+
+        sequence_np = sequences.detach().cpu().numpy()
+        if sequence_np.ndim != 3:
+            raise HTTPException(status_code=500, detail="Scoped sequence tensor must be 3D for evidence matching")
+
+        match_matrix = data.activations[:, :, p_idx].astype(np.float32)  # [N, T]
+        if match_matrix.size == 0:
+            warnings.append(
+                ApiWarning(
+                    code="WARN_EMPTY_MATCHES",
+                    message="No activation values are available for evidence matching in the current scope.",
+                )
+            )
+            return ShapeletEvidenceTopMatchesResponse(
+                dataset=bundle.dataset_name,
+                shapelet_id=shapelet_id,
+                scope=normalized_scope,
+                shapelet_length=shapelet_length,
+                rank_metric="peak_activation",
+                limit=int(limit),
+                items=[],
+                warnings=warnings,
+            )
+
+        peak_t = match_matrix.argmax(axis=1).astype(int)
+        peak_activation = match_matrix.max(axis=1).astype(np.float32)
+        ranked_indices = np.argsort(-peak_activation, kind="stable")
+
+        items: list[ShapeletEvidenceMatchItem] = []
+        half_len = shapelet_length // 2
+        seq_len = int(match_matrix.shape[1])
+
+        for rank, sample_idx in enumerate(ranked_indices[:limit].tolist(), start=1):
+            sample_idx_int = int(sample_idx)
+            center = int(peak_t[sample_idx_int])
+            t_start = center - half_len
+            t_end = t_start + shapelet_length - 1
+            if t_start < 0:
+                t_start = 0
+                t_end = min(shapelet_length - 1, seq_len - 1)
+            if t_end >= seq_len:
+                t_end = seq_len - 1
+                t_start = max(0, t_end - shapelet_length + 1)
+
+            raw_window = sequence_np[sample_idx_int, t_start : t_end + 1, :].astype(np.float32)
+            activation_window = match_matrix[sample_idx_int, t_start : t_end + 1].astype(np.float32)
+            probs = predictions.probs[sample_idx_int] if sample_idx_int < len(predictions.probs) else np.array([])
+
+            items.append(
+                ShapeletEvidenceMatchItem(
+                    sample_id=str(sample_idx_int),
+                    rank=int(rank),
+                    label=int(predictions.labels[sample_idx_int]) if sample_idx_int < len(predictions.labels) else None,
+                    pred_class=int(predictions.preds[sample_idx_int]) if sample_idx_int < len(predictions.preds) else None,
+                    margin=_margin_from_probs(probs) if probs.size else None,
+                    peak_t=center,
+                    peak_activation=float(peak_activation[sample_idx_int]),
+                    t_start=int(t_start),
+                    t_end=int(t_end),
+                    raw_window=[[float(v) for v in row.tolist()] for row in raw_window],
+                    activation_window=[float(v) for v in activation_window.tolist()],
+                )
+            )
+
+        if not items:
+            warnings.append(
+                ApiWarning(
+                    code="WARN_EMPTY_MATCHES",
+                    message="No evidence items were produced for the selected shapelet under the current scope.",
+                )
+            )
+
+        return ShapeletEvidenceTopMatchesResponse(
+            dataset=bundle.dataset_name,
+            shapelet_id=shapelet_id,
+            scope=normalized_scope,
+            shapelet_length=shapelet_length,
+            rank_metric="peak_activation",
+            limit=int(limit),
+            items=items,
+            warnings=warnings,
+        )
+
     def _build_matrix_view(
         self,
         dataset_name: str,
@@ -835,6 +1044,7 @@ class PartBService:
         shapelet_id: str,
         scope: str,
         omega: float,
+        class_id: int | None,
         offset: int,
         limit: int,
         rank_metric: str,
@@ -852,12 +1062,20 @@ class PartBService:
 
         p_idx = self._parse_shapelet_index(shapelet_id, activations.max_scores.shape[1])
         trigger_scores = activations.max_scores[:, p_idx]
+        peak_positions = np.argmax(activations.activations[:, :, p_idx], axis=1)
         triggered_indices = [idx for idx, score in enumerate(trigger_scores.tolist()) if float(score) >= normalized_omega]
+        if class_id is not None:
+            triggered_indices = [idx for idx in triggered_indices if int(predictions.labels[idx]) == int(class_id)]
         ranked_indices = sorted(triggered_indices, key=lambda idx: (-float(trigger_scores[idx]), int(idx)))
+        gallery_items = self._gallery_items(bundle)
+        shapelet_length = int(gallery_items[p_idx].shapelet_len)
 
         items: list[TopHitSampleItem] = []
         for rank, sample_idx in enumerate(ranked_indices[offset : offset + limit], start=offset + 1):
             probs = predictions.probs[sample_idx]
+            peak_t = int(peak_positions[sample_idx])
+            start = max(0, peak_t - shapelet_length // 2)
+            end = start + max(shapelet_length - 1, 0)
             items.append(
                 TopHitSampleItem(
                     sample_id=str(sample_idx),
@@ -866,6 +1084,9 @@ class PartBService:
                     label=int(predictions.labels[sample_idx]) if sample_idx < len(predictions.labels) else None,
                     pred_class=int(predictions.preds[sample_idx]) if sample_idx < len(predictions.preds) else None,
                     margin=_margin_from_probs(probs) if sample_idx < len(predictions.probs) else None,
+                    peak_t=peak_t,
+                    t_start=int(start),
+                    t_end=int(end),
                 )
             )
 
@@ -874,6 +1095,8 @@ class PartBService:
             shapelet_id=shapelet_id,
             scope=normalized_scope,
             omega=normalized_omega,
+            class_id=class_id,
+            shapelet_length=shapelet_length,
             total=len(ranked_indices),
             offset=offset,
             limit=limit,
